@@ -223,9 +223,16 @@ def _signal_target(pid: int, expect_starttime: str) -> int | None:
 def _terminate(pid: int, expect_starttime: str, grace: float = 5.0) -> None:
     """SIGTERM then SIGKILL the session, if it is provably still ours.
 
-    The process group rather than the pid, because Vivado forks children --
-    but only after `_signal_target` has confirmed the identity. And never
-    `pkill -f vivado`, which also matches the shell that invoked us.
+    Never `pkill -f vivado`, which also matches the shell that invoked us.
+
+    With a real Vivado the descriptor's pid is the inner
+    `unwrapped/lnx64.o/vivado`, not the group leader -- the `bin/vivado` and
+    `bin/loader` shell wrappers sit above it -- so `_signal_target` declines
+    the group and signals that pid alone. That is sufficient: the wrappers are
+    only waiting on the child and exit with it, verified by checking the group
+    is empty after a `--force` stop. Do not "fix" this by killing the group
+    unconditionally; the guard is what keeps a recycled pid from taking out
+    somebody else's Vivado.
     """
     for sig in (signal.SIGTERM, signal.SIGKILL):
         target = _signal_target(pid, expect_starttime)
