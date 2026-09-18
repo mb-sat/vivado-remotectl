@@ -1,0 +1,19 @@
+# Example ~/.Xilinx/Vivado/<version>/Vivado_init.tcl
+#
+# Vivado sources this file on every launch, including `start_gui`. Adding the
+# line below makes an interactive or GUI Vivado register itself as a session,
+# so it appears in `vrc list` and accepts `vrc -e` like any other.
+#
+# Get the path for your installation with:
+#
+#     vrc plugin-path
+#
+# The plugin detects that it is not running under `vrc start` and does not
+# take over the event loop, so the GUI stays responsive.
+
+source /path/to/vivado-remotectl/src/vivado_remotectl/tcl/vivado_remotectl.tcl
+
+# Name it something recognisable rather than the default vivado-<pid>:
+#
+#     set ::env(VRC_NAME) gui
+#     source /path/to/vivado_remotectl.tcl
