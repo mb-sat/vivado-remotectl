@@ -96,6 +96,7 @@ XDC
 
 cat > /tmp/vrc-timing/ooc.tcl <<'TCL'
 close_design -quiet
+close_project -quiet
 read_verilog [list /path/to/ip/sources/*.v /path/to/ip/build/regs.v]
 read_xdc /tmp/vrc-timing/ooc.xdc
 synth_design -top <top> -part xcvc1902-vsva2197-2MP-e-S -mode out_of_context \
@@ -117,8 +118,12 @@ WNS=0.421 from=g_lane[0].acc_reg/DSP58C<0>_INST/DSP_A_B_DATA58_INST/CLK  to=g_la
 ```
 
 `close_design -quiet` first, then re-read: that is what makes the second
-measurement cheap. `-generic` sweeps build parameters without touching the
-packaging Tcl.
+measurement cheap. `close_project -quiet` too — files read with `read_verilog`
+land in an implicit in-memory project and stay there, so without it a later run
+still holds the earlier one's files, an older definition of the module can win,
+and the only sign is a `CRITICAL WARNING: [Synth 8-9873] overwriting previous
+definition of module` in a log nobody is reading. `-generic` sweeps build
+parameters without touching the packaging Tcl.
 
 ## Sweep a parameter without paying startup again
 
@@ -129,6 +134,7 @@ so `--tail` shows each result as it lands instead of nothing for ten minutes:
 vrc -s work --tail -e '
   foreach lanes {2 4 8 16} {
     close_design -quiet
+    close_project -quiet
     read_verilog [list /path/to/ip/sources/*.v]
     read_xdc /tmp/vrc-timing/ooc.xdc
     synth_design -top <top> -part xcvc1902-vsva2197-2MP-e-S \
