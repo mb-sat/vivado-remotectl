@@ -141,6 +141,19 @@ pretending otherwise, and requests queue until it is free.
 If a descriptor is left behind by a session that died hard, `vrc list --prune`
 clears it. Nothing is deleted while the process is still there.
 
+## Hand it to a coding agent
+
+An agent that only knows `vivado -mode batch` will start a fresh Vivado per
+question and never compare anything. `contrib/skills/vivado-session/` is a
+Claude Code skill describing the workflow this tool exists for — two sessions
+for a baseline comparison, the out-of-context synthesis loop, sweeping a
+generic in one request — along with the traps that cost real time, like
+counting DSP58 primitives instead of slices.
+
+```sh
+cp -r contrib/skills/vivado-session ~/.claude/skills/
+```
+
 ## Commands
 
 ```
