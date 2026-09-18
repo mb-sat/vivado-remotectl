@@ -154,6 +154,70 @@ counting DSP58 primitives instead of slices.
 cp -r contrib/skills/vivado-session ~/.claude/skills/
 ```
 
+## Drive a session from Emacs
+
+`contrib/emacs/vrc.el` puts the loop in the editor: change the RTL, press one
+key, read the WNS that came back. Synthesis runs in the background, Vivado's
+progress appears in a second buffer, and an `ERROR:` in that buffer jumps
+straight to the line of Verilog that caused it.
+
+```elisp
+(add-to-list 'load-path "~/git/vivado-remotectl/contrib/emacs")
+(require 'vrc)
+(add-hook 'tcl-mode-hook #'vrc-mode)
+(add-hook 'verilog-mode-hook #'vrc-mode)
+```
+
+Everything hangs off `C-c v`. A single user prefix rather than the usual
+`C-c C-<letter>` bindings, because verilog-mode and vhdl-mode have taken every
+one worth having.
+
+| key | does |
+|---|---|
+| `C-c v r` / `C-c v b` | evaluate the region or the whole buffer |
+| `C-c v e` | evaluate one line typed in the minibuffer |
+| `C-c v o` | synthesise the module at point out of context, report its WNS |
+| `C-c v g` | save every buffer and run the last script again |
+| `C-c v l` | follow the session log |
+| `C-c v z` | a prompt on the session |
+| `C-c v k` | stop waiting for a job, which keeps running |
+
+`C-c v o` and `C-c v g` are the loop. The first runs the out-of-context script
+from the skill against the module around point; the second repeats it after an
+edit and reports the difference, `WNS=0.421 (was 0.380, +0.041)`, which is the
+comparison the tool exists to make. The part number and constraints live in
+`vrc-ooc-part` and `vrc-ooc-xdc`, so a `.dir-locals.el` sets them once per
+project.
+
+That same file is how a baseline and a working tree stop being a bookkeeping
+problem. Point each checkout at its own session and the same key does the
+right thing in both:
+
+```elisp
+;; .dir-locals.el in the baseline checkout
+((nil . ((vrc-session . "baseline")
+         (vrc-ooc-part . "xcvc1902-vsva2197-2MP-e-S"))))
+```
+
+A job that outlasts five seconds pops up `*vrc-log: NAME*`, which follows the
+session log a quarter of a second behind Vivado. Scroll back in it and it
+stops following until you return to the end, so reading an error mid-run does
+not fight the output. `M-g M-n` walks the errors of the current run only, and
+lands in the RTL.
+
+One thing to know: Vivado runs one script at a time and nothing can interrupt
+`synth_design`. So a second evaluation during a synthesis is refused outright
+rather than queued behind twenty-five minutes of work, and `C-c v k` only
+detaches this end — the script keeps going, which is why a long one should
+`puts` its result as well as `return` it, so the answer survives in the log.
+
+Tcl goes to the session through `vrc -f -` rather than through the prompt,
+which is what makes a multi-line `foreach` work: `vrc repl` reads a line at a
+time and the editor would split the block. The prompt is there for one-liners.
+
+[contrib/emacs/README.md](contrib/emacs/README.md) works a real design through
+the whole loop, and has the rest of the keys and settings.
+
 ## Commands
 
 ```
