@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vivado-remotectl"
+version = "0.1.0"
+description = "Inject Tcl into running Vivado sessions over a loopback socket."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Hannes Klas", email = "hannes.klas@mb-satellite.com" }]
+keywords = ["vivado", "xilinx", "fpga", "tcl"]
+# No runtime dependencies: this has to work from any python3 on a build host.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+vivado-remotectl = "vivado_remotectl.cli:main"
+vrc = "vivado_remotectl.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vivado_remotectl = ["tcl/*.tcl"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
