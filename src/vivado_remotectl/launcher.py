@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .client import ConnectFailed, Session
 from .registry import (
+    SANDBOX_HINT,
     RegistryError,
     SessionInfo,
     find,
@@ -18,6 +19,7 @@ from .registry import (
     pid_alive,
     probe,
     proc_starttime,
+    sandboxed,
     state_dir,
     validate_name,
 )
@@ -113,6 +115,8 @@ def start_session(
 ) -> SessionInfo:
     """Launch a Vivado with the plugin loaded and wait until it answers."""
     validate_name(name)
+    if sandboxed():
+        raise LaunchError(f"not starting '{name}': {SANDBOX_HINT}")
     directory = directory or state_dir()
     directory.mkdir(parents=True, exist_ok=True)
 

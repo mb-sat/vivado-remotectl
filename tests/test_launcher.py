@@ -61,6 +61,13 @@ def test_find_vivado_reports_available_versions():
         launcher.find_vivado(version="1999.1")
 
 
+def test_start_refuses_inside_the_sandbox(registry_dir, monkeypatch):
+    monkeypatch.setenv("SANDBOX_RUNTIME", "1")
+    with pytest.raises(LaunchError, match="sandboxed"):
+        launcher.start_session("boxed", directory=registry_dir)
+    assert not (registry_dir / "boxed.session").exists()
+
+
 def test_start_brings_a_session_up(started, registry_dir):
     assert started.port > 0
     assert registry.pid_alive(started.pid)
