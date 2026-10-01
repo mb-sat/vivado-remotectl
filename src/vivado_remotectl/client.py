@@ -14,7 +14,7 @@ from .protocol import (
     encode_request,
     read_response,
 )
-from .registry import SessionInfo
+from .registry import SANDBOX_HINT, SessionInfo, sandboxed
 
 
 class ConnectFailed(Exception):
@@ -44,10 +44,13 @@ class Session:
                 (self.info.host, self.info.port), timeout=timeout
             )
         except OSError as exc:
-            raise ConnectFailed(
+            msg = (
                 f"cannot reach session '{self.info.name}' on "
                 f"{self.info.host}:{self.info.port}: {exc}"
-            ) from exc
+            )
+            if sandboxed():
+                msg += f"; {SANDBOX_HINT}"
+            raise ConnectFailed(msg) from exc
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = sock
         self._reader = FrameReader(sock)

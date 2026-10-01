@@ -21,6 +21,16 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 IDLE = "idle"
 BUSY = "busy"
 DEAD = "dead"
+#: Not dead, just out of reach: see :func:`sandboxed`.
+SANDBOXED = "sandboxed"
+
+#: Appended to errors raised from inside a sandbox.
+SANDBOX_HINT = (
+    "this shell is sandboxed (SANDBOX_RUNTIME is set): it has its own loopback "
+    "and pid namespace, so no session is reachable from here. Run vrc as a "
+    "bare command, without cd &&, pipes, env prefixes or loops, so the "
+    "sandbox's excludedCommands entry applies"
+)
 
 
 class RegistryError(Exception):
@@ -125,6 +135,17 @@ def list_sessions(directory: Path | None = None) -> list[SessionInfo]:
     return out
 
 
+def sandboxed() -> bool:
+    """Are we inside the Claude Code sandbox?
+
+    It runs commands under bwrap with ``--unshare-net``, so 127.0.0.1 is a
+    private loopback and every session refuses the connection. Telling that
+    apart from a dead session keeps ``prune`` from deleting live descriptors
+    and stops callers from starting a second Vivado beside the first.
+    """
+    return bool(os.environ.get("SANDBOX_RUNTIME"))
+
+
 def pid_alive(pid: int) -> bool:
     """Is this pid a process we should consider running?
 
@@ -194,7 +215,7 @@ def probe(info: SessionInfo, timeout: float = 0.5) -> str:
     try:
         sock = socket.create_connection((info.host, info.port), timeout=timeout)
     except OSError:
-        return DEAD
+        return SANDBOXED if sandboxed() else DEAD
     try:
         sock.sendall(encode_request("expr 1", info.token))
         read_response(FrameReader(sock))
