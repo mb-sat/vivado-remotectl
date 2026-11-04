@@ -59,7 +59,7 @@ vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 Subcommands (must come first):
 
   vrc start [NAME]   launch a Vivado session
-  vrc stop  [NAME]   shut one down (--all for every session)
+  vrc stop  [NAME]   shut one down (--mine for yours, --all for every one)
   vrc cancel [NAME]  cancel the running command, keep the session
   vrc wait  [NAME]   wait until the session is free, print the last result
   vrc result [NAME]  print the last result now
@@ -76,7 +76,7 @@ Examples:
   vrc -e 'version -short'
   vrc -s dut -f ooc.tcl --tail
   vrc -e 'close_design -quiet' -e 'read_verilog {a.v b.v}'
-  vrc list && vrc stop --all
+  vrc list && vrc stop --mine
 """
 
 
@@ -513,15 +513,29 @@ def _memory_refusal(name: str, min_free_gb: float) -> str | None:
 def cmd_stop(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc stop")
     p.add_argument("name", nargs="?")
-    p.add_argument("--all", action="store_true")
+    which = p.add_mutually_exclusive_group()
+    which.add_argument(
+        "--mine", action="store_true",
+        help="every session started from this Claude session or by this user",
+    )
+    which.add_argument(
+        "--all", action="store_true",
+        help="every session on the machine, except busy ones somebody else started",
+    )
     p.add_argument("--force", action="store_true", help="skip the graceful exit")
     p.add_argument("--timeout", type=float, default=20.0, metavar="SEC")
     args = p.parse_args(argv)
+    if args.name and (args.all or args.mine):
+        return die("give a session name or --mine/--all, not both")
 
-    if args.all:
+    me = registry.current_owner()
+    skipped = 0
+    if args.all or args.mine:
         targets = registry.list_sessions()
+        if args.mine:
+            targets = [i for i in targets if i.owner == me]
         if not targets:
-            print("no sessions", file=sys.stderr)
+            print("no sessions" + (" of yours" if args.mine else ""), file=sys.stderr)
             return EXIT_OK
     else:
         try:
@@ -530,9 +544,19 @@ def cmd_stop(argv: list[str]) -> int:
             return die(str(exc), EXIT_NO_SESSION)
 
     for info in targets:
+        # --all once killed another agent's synthesis mid-run. A busy session
+        # that is not ours is left alone; naming it still stops it.
+        if args.all and info.owner != me and registry.probe(info) == registry.BUSY:
+            print(
+                f"{info.name}: left running, busy and started by "
+                f"{registry.short_owner(info.owner)}; stop it by name if you must",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
         outcome = stop_session(info, timeout=args.timeout, force=args.force)
         print(f"{info.name}: {outcome}")
-    return EXIT_OK
+    return EXIT_TCL_ERROR if skipped else EXIT_OK
 
 
 def cmd_cancel(argv: list[str]) -> int:
@@ -584,6 +608,7 @@ def _fmt_uptime(seconds: int) -> str:
 def cmd_list(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc list")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--mine", action="store_true", help="only sessions you started")
     p.add_argument("--prune", action="store_true", help="delete dead descriptors")
     args = p.parse_args(argv)
 
@@ -592,6 +617,9 @@ def cmd_list(argv: list[str]) -> int:
             print(f"pruned {name}", file=sys.stderr)
 
     sessions = registry.list_sessions()
+    if args.mine:
+        me = registry.current_owner()
+        sessions = [i for i in sessions if i.owner == me]
     rows = [(info, registry.probe(info)) for info in sessions]
     tree = procinfo.children_map()
     mem = {info.name: procinfo.tree_rss(info.pid, tree) for info in sessions}
@@ -611,6 +639,7 @@ def cmd_list(argv: list[str]) -> int:
                         "cwd": i.cwd,
                         "tcl": i.tcl,
                         "rss": mem[i.name],
+                        "owner": i.owner,
                         "log": str(i.log_path),
                     }
                     for i, status in rows
@@ -623,13 +652,14 @@ def cmd_list(argv: list[str]) -> int:
     if rows:
         print(
             f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<9} {'UPTIME':>8} "
-            f"{'RSS':>6}  CWD"
+            f"{'RSS':>6} {'OWNER':<15}  CWD"
         )
         for info, status in rows:
             print(
                 f"{info.name:<20} {info.port:>6} {info.pid:>8} {status:<9} "
                 f"{_fmt_uptime(info.uptime) if info.started else '-':>8} "
-                f"{procinfo.fmt_bytes(mem[info.name]):>6}  {info.cwd}"
+                f"{procinfo.fmt_bytes(mem[info.name]):>6} "
+                f"{registry.short_owner(info.owner):<15}  {info.cwd}"
             )
     else:
         print(f"no sessions in {registry.state_dir()}", file=sys.stderr)
@@ -806,6 +836,7 @@ def cmd_info(argv: list[str]) -> int:
         "tcl": info.tcl,
         "cwd": info.cwd,
         "cancel": info.cancel or "-",
+        "owner": info.owner or "-",
         "log": str(info.log_path),
         "descriptor": str(info.path) if info.path else "",
     }

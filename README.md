@@ -59,9 +59,9 @@ starting a second one needs no bookkeeping:
 ```console
 $ vrc start baseline --cwd /tmp/head-checkout
 $ vrc list
-NAME                   PORT      PID STATUS      UPTIME    RSS  CWD
-baseline              45711  2118440 idle         2m31s   4.6G  /tmp/head-checkout
-dut                   41239  2118203 idle         4m10s   5.2G  /home/you/rtl
+NAME                   PORT      PID STATUS      UPTIME    RSS OWNER            CWD
+baseline              45711  2118440 idle         2m31s   4.6G user:you         /tmp/head-checkout
+dut                   41239  2118203 idle         4m10s   5.2G user:you         /home/you/rtl
 2 Vivado(s) hold 9.8G; 18.7G available
 ```
 
@@ -88,8 +88,16 @@ total memory on the assumption that it owns the machine.
 
 ```sh
 vrc stop dut      # graceful: asks it to exit, then verifies
-vrc stop --all
+vrc stop --mine   # every session you started
+vrc stop --all    # every session, but see below
 ```
+
+`OWNER` is who ran `vrc start`: the Claude Code session, as `claude:<id>`
+(its subagents share the id), or otherwise `user:<name>`; `$VRC_OWNER`
+overrides both. `--mine` and `vrc list --mine` select by it. `--all` stops
+every session except a busy one somebody else started, which it names on
+stderr and leaves running, exiting 1; stopping that one takes its name. A
+Vivado attached through `Vivado_init.tcl` has no owner and so is never yours.
 
 ## Watch a long synthesis
 
@@ -196,7 +204,7 @@ Exit codes are distinct so a script can branch on them:
 | code | meaning |
 |---|---|
 | 0 | fine |
-| 1 | the script raised; `errorInfo` is on stderr |
+| 1 | the script raised; `errorInfo` is on stderr. From `vrc stop --all`: it left a busy session of somebody else's running |
 | 2 | bad usage |
 | 3 | no session, an ambiguous one, nothing listening, or no recorded result |
 | 4 | `--timeout` expired; the script is still running |
@@ -300,11 +308,11 @@ vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
                                       --min-free GB
                                       --cwd DIR --gui --wait SEC --arg ARG
-vrc stop  [NAME]   shut one down      --all --force --timeout SEC
+vrc stop  [NAME]   shut one down      --mine --all --force --timeout SEC
 vrc cancel [NAME]  cancel the command --wait SEC
 vrc wait  [NAME]   wait, last result  --timeout SEC
 vrc result [NAME]  last result now
-vrc list           what is running    --json --prune
+vrc list           what is running    --json --prune --mine
 vrc log   [NAME]   session output     -f/--follow -n LINES
 vrc repl  [NAME]   interactive prompt
 vrc ping  [NAME]   check it answers
@@ -327,6 +335,7 @@ spellings are what people already type.
 | `VIVADO_REMOTECTL_SESSION` | default session name, instead of `-s` |
 | `VRC_VIVADO` | vivado executable to launch |
 | `VRC_DIR` | where session descriptors live |
+| `VRC_OWNER` | owner `vrc start` records, instead of the Claude session or user |
 | `XDG_STATE_HOME` | base for the default descriptor directory |
 
 Descriptors default to `~/.local/state/vivado-remotectl/`, under *state*

@@ -326,3 +326,65 @@ def test_start_refuses_when_memory_is_short(registry_dir, capsys):
     assert "not starting 'big'" in err
     assert "--min-free 0" in err
     assert not (registry_dir / "big.session").exists()
+
+
+# -- owners ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def foreign(live, registry_dir, monkeypatch):
+    """A second session, started by somebody else."""
+    monkeypatch.setenv("VRC_OWNER", "claude:someone-else")
+    info = launcher.start_session(
+        "other", vivado=str(FAKE_VIVADO), wait=60.0, directory=registry_dir
+    )
+    monkeypatch.delenv("VRC_OWNER")
+    yield info
+    if registry.owns_pid(info):
+        launcher.stop_session(info, force=True)
+
+
+def test_start_records_the_owner(live):
+    assert registry.find("cli").owner == registry.current_owner()
+
+
+def test_owner_comes_from_the_claude_session(monkeypatch):
+    monkeypatch.delenv("VRC_OWNER", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "0123456789abcdef")
+    assert registry.current_owner() == "claude:0123456789abcdef"
+    assert registry.short_owner("claude:0123456789abcdef") == "claude:01234567"
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    assert registry.current_owner().startswith("user:")
+
+
+def test_list_mine_and_the_owner_column(foreign, capsys):
+    assert main(["list"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "OWNER" in out and "claude:someone-" in out
+    assert main(["list", "--mine"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "cli" in out and "other" not in out
+
+
+def test_stop_mine_leaves_other_sessions(foreign, capsys):
+    assert main(["stop", "--mine"]) == EXIT_OK
+    assert capsys.readouterr().out == "cli: stopped\n"
+    assert registry.find("other") is not None
+    assert registry.probe(foreign) == registry.IDLE
+
+
+def test_stop_all_spares_somebody_elses_busy_session(foreign, capsys):
+    assert main(["-s", "other", "--detach", "-e", "after 3000"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["stop", "--all"]) == EXIT_TCL_ERROR
+    out = capsys.readouterr()
+    assert "cli: stopped" in out.out
+    assert "other: left running" in out.err
+    assert registry.probe(foreign) == registry.BUSY
+    assert main(["wait", "other"]) == EXIT_OK
+
+
+def test_stop_all_takes_somebody_elses_idle_session(foreign, capsys):
+    assert main(["stop", "--all"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "cli: stopped" in out and "other: stopped" in out

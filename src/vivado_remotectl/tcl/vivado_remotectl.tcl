@@ -25,6 +25,7 @@
 #                  which `vrc start` feeds an endless `::vrc::serve` stream.
 #                  Only this mode can be cancelled, see ::vrc::serve.
 #   VRC_AUTOSTART  0 -> define procs but do not bind
+#   VRC_OWNER      who started the session, recorded in the descriptor
 # ==============================================================================
 
 namespace eval ::vrc {
@@ -219,6 +220,10 @@ proc ::vrc::_write_session {} {
     puts $f "tcl [info patchlevel]"
     puts $f "started [clock seconds]"
     puts $f "cwd [pwd]"
+    # Who started it, so `vrc stop --mine` and `--all` can tell sessions
+    # apart on a shared host. Set by `vrc start`; absent when attached.
+    set owner [::vrc::_env VRC_OWNER ""]
+    if {$owner ne ""} { puts $f "owner $owner" }
     # Tells the client this plugin writes <name>.running and <name>.result.
     puts $f "results 1"
     if {[::vrc::_env VRC_SERVE 0] eq "prompt"} {

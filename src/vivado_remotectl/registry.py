@@ -79,6 +79,8 @@ class SessionInfo:
     cancel: str = ""
     #: The plugin keeps <name>.running and <name>.result; older ones do not.
     results: bool = False
+    #: Who started it, see :func:`current_owner`. Empty when attached.
+    owner: str = ""
     path: Path | None = None
 
     @property
@@ -125,6 +127,7 @@ def read_session_file(path: Path) -> SessionInfo | None:
             starttime=fields.get("starttime", ""),
             cancel=fields.get("cancel", ""),
             results=fields.get("results", "") == "1",
+            owner=fields.get("owner", ""),
             path=path,
         )
     except (KeyError, ValueError):
@@ -202,6 +205,38 @@ def remove_files(info: SessionInfo) -> None:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def current_owner() -> str:
+    """Who is asking: the owner recorded by a `vrc start` from this shell.
+
+    ``$VRC_OWNER`` if set, else the Claude Code session (whose subagents share
+    its id), else the user. Several agents on one host each see only their
+    own sessions as theirs; a human sees every session they started by hand.
+    """
+    explicit = os.environ.get("VRC_OWNER")
+    if explicit:
+        return explicit
+    claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if claude:
+        return f"claude:{claude}"
+    try:
+        import pwd
+
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        user = os.environ.get("USER", str(os.getuid()))
+    return f"user:{user}"
+
+
+def short_owner(owner: str) -> str:
+    """``claude:<uuid>`` cut to eight characters of the id, for tables."""
+    if not owner:
+        return "-"
+    kind, _, ident = owner.partition(":")
+    if kind == "claude":
+        return f"claude:{ident[:8]}"
+    return owner[:20]
 
 
 def sandboxed() -> bool:

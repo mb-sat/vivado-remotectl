@@ -256,16 +256,16 @@ from `MemTotal` assumes it owns the host.
 
 ```bash
 vrc stop work            # graceful, then verified
+vrc stop --mine          # every session this Claude session started
 vrc stop --all           # MACHINE-WIDE -- see below
 ```
 
-**`--all` means every session on the machine, not every session you started.**
-On a shared build host there is routinely more than one person or agent
-working, each holding their own Vivado, and `vrc` has no notion of whose is
-whose. Using it to tidy up after yourself will kill someone's synthesis
-mid-run with no warning and no way for them to tell what happened. Stop
-sessions by the names you started them under, and reach for `--all` only when
-`vrc list` shows nothing you do not recognise.
+To tidy up after yourself, use **`--mine`**, not `--all`. Every session records
+who started it — this Claude session as `claude:<id>`, shared with its
+subagents — and `vrc list` shows it in `OWNER`. On a shared host other people
+and agents hold their own Vivados. `--all` leaves a busy session somebody else
+started running, and says so, but it still stops their idle ones, which may
+hold a design they mean to come back to.
 
 The reverse also catches people: someone driving `vivado -mode batch` directly
 never registers as a session. `vrc list` reports such processes on stderr as

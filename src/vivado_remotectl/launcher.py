@@ -14,6 +14,7 @@ from .registry import (
     SANDBOX_HINT,
     RegistryError,
     SessionInfo,
+    current_owner,
     find,
     owns_pid,
     pid_alive,
@@ -98,6 +99,7 @@ def child_env(name: str, port: int, directory: Path, serve: bool = True) -> dict
     env["VRC_DIR"] = str(directory)
     env["VRC_SERVE"] = "prompt" if serve else "0"
     env["VRC_AUTOSTART"] = "1"
+    env["VRC_OWNER"] = current_owner()
     return env
 
 
