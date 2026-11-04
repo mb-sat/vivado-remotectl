@@ -2,6 +2,8 @@
 
 ;; Copyright (C) 2026 Hannes Klas
 
+;; SPDX-License-Identifier: MIT
+
 ;; Author: Hannes Klas <hannes.klas@mb-satellite.com>
 ;; Keywords: hardware, tools, processes
 ;; Package-Requires: ((emacs "28.1"))

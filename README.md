@@ -415,3 +415,7 @@ vrc -f ooc.tcl & sleep 30; vrc cancel real   # client exits 6
 vrc -e 'expr 6*7'           # still answers
 vrc stop real
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
