@@ -301,3 +301,28 @@ def test_wait_on_an_idle_session_returns_at_once(live, capsys):
     capsys.readouterr()
     assert main(["wait", "--timeout", "2"]) == EXIT_OK
     assert capsys.readouterr().out == "done\n"
+
+
+# -- memory --------------------------------------------------------------------
+
+
+def test_list_shows_memory_per_session_and_in_total(live, capsys):
+    import json
+
+    assert main(["list"]) == EXIT_OK
+    out = capsys.readouterr()
+    header, row = out.out.splitlines()[:2]
+    assert "RSS" in header
+    assert row.split()[5].endswith(("M", "G"))
+    assert "1 Vivado(s) hold" in out.err
+    assert "available" in out.err
+    assert main(["list", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)[0]["rss"] > 0
+
+
+def test_start_refuses_when_memory_is_short(registry_dir, capsys):
+    assert main(["start", "big", "--min-free", "1e9"]) == EXIT_NO_SESSION
+    err = capsys.readouterr().err
+    assert "not starting 'big'" in err
+    assert "--min-free 0" in err
+    assert not (registry_dir / "big.session").exists()

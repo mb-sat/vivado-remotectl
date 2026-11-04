@@ -59,9 +59,10 @@ starting a second one needs no bookkeeping:
 ```console
 $ vrc start baseline --cwd /tmp/head-checkout
 $ vrc list
-NAME                   PORT      PID STATUS     UPTIME  CWD
-baseline              45711  2118440 idle          31s  /tmp/head-checkout
-dut                   41239  2118203 idle       4m10s  /home/you/rtl
+NAME                   PORT      PID STATUS      UPTIME    RSS  CWD
+baseline              45711  2118440 idle         2m31s   4.6G  /tmp/head-checkout
+dut                   41239  2118203 idle         4m10s   5.2G  /home/you/rtl
+2 Vivado(s) hold 9.8G; 18.7G available
 ```
 
 With more than one session running, say which you mean with `-s`, or set
@@ -69,9 +70,21 @@ With more than one session running, say which you mean with `-s`, or set
 optional. Getting this wrong is an error that lists the candidates rather
 than a guess.
 
-Each session is a separate Vivado process holding its own design, so they cost
-about 3 GB each. Stop them before starting a full build, which sizes its job
-count from total memory on the assumption that it owns the machine.
+Each session is a separate Vivado process holding its own design, 4 to 6 GB
+once a design is synthesised. `RSS` counts the
+session and the helper processes synthesis starts under it. The line under the
+table, on stderr, adds up every Vivado on the machine, including ones that are
+not sessions, such as a `vivado -mode batch` run, which it also lists by pid:
+
+```
+not a session: pid 2120411 3.8G  vivado -mode batch -source build.tcl
+```
+
+`vrc start` refuses when less than 6 GB is available, because with no swap
+the OOM killer otherwise picks which Vivado dies, and lists what is holding the
+memory. `--min-free GB` changes the limit and `--min-free 0` skips the check.
+Stop sessions before starting a full build, which sizes its job count from
+total memory on the assumption that it owns the machine.
 
 ```sh
 vrc stop dut      # graceful: asks it to exit, then verifies
@@ -285,6 +298,7 @@ the whole loop, and has the rest of the keys and settings.
 vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
+                                      --min-free GB
                                       --cwd DIR --gui --wait SEC --arg ARG
 vrc stop  [NAME]   shut one down      --all --force --timeout SEC
 vrc cancel [NAME]  cancel the command --wait SEC

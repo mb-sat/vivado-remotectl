@@ -203,7 +203,8 @@ previous design's timing.
 ## Run the tests
 
 The evaluation tests need a session, and a fake Vivado is enough — it runs the
-real plugin on Vivado's own `tclsh8.5` (or a 2024 Vivado's `tclsh8.6`), with no 3 GB process and no hardware.
+real plugin on Vivado's own `tclsh8.5` (or a 2024 Vivado's `tclsh8.6`), with
+no Vivado process and no hardware.
 
 ```console
 $ export VRC_TEST_TCLSH=/tools/Xilinx/Vivado/2023.2/bin/unwrapped/lnx64.o/tclsh8.5

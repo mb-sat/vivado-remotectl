@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import registry
+from . import procinfo, registry
 from .client import ConnectFailed, Session
 from .launcher import (
     CancelError,
@@ -451,7 +451,17 @@ def cmd_start(argv: list[str]) -> int:
         "--arg", action="append", default=[], metavar="ARG",
         help="extra argument passed through to vivado (repeatable)",
     )
+    p.add_argument(
+        "--min-free", type=float, default=DEFAULT_MIN_FREE_GB, metavar="GB",
+        help=f"refuse to start with less memory available than this "
+        f"(default {DEFAULT_MIN_FREE_GB:g}; 0 skips the check)",
+    )
     args = p.parse_args(argv)
+
+    if args.min_free > 0:
+        refusal = _memory_refusal(args.name, args.min_free)
+        if refusal:
+            return die(refusal, EXIT_NO_SESSION)
 
     try:
         info = start_session(
@@ -470,6 +480,34 @@ def cmd_start(argv: list[str]) -> int:
     print(f"{info.name}: listening on {info.host}:{info.port} (pid {info.pid})")
     print(f"log: {info.log_path}")
     return EXIT_OK
+
+
+#: A session reaches 4-6 GB once a design is synthesised; with no swap, a
+#: start that leaves less than that free ends with the OOM killer choosing.
+DEFAULT_MIN_FREE_GB = 6.0
+
+
+def _memory_refusal(name: str, min_free_gb: float) -> str | None:
+    free = procinfo.mem_available()
+    if free is None or free >= min_free_gb * 2**30:
+        return None
+    sessions = registry.list_sessions()
+    tree = procinfo.children_map()
+    held = [
+        f"{i.name} {procinfo.fmt_bytes(procinfo.tree_rss(i.pid, tree))}"
+        for i in sessions
+    ]
+    held += [
+        f"pid {s.pid} {procinfo.fmt_bytes(s.rss)} (not a session)"
+        for s in procinfo.stray_vivados([i.pid for i in sessions], tree)
+    ]
+    msg = (
+        f"not starting '{name}': {procinfo.fmt_bytes(free)} available, and a "
+        f"session needs 4-6 GB once a design is loaded"
+    )
+    if held:
+        msg += f"; Vivados holding memory: {', '.join(held)}"
+    return msg + f". Stop one, or pass --min-free 0 to start anyway"
 
 
 def cmd_stop(argv: list[str]) -> int:
@@ -555,6 +593,9 @@ def cmd_list(argv: list[str]) -> int:
 
     sessions = registry.list_sessions()
     rows = [(info, registry.probe(info)) for info in sessions]
+    tree = procinfo.children_map()
+    mem = {info.name: procinfo.tree_rss(info.pid, tree) for info in sessions}
+    strays = procinfo.stray_vivados([info.pid for info in sessions], tree)
 
     if args.json:
         print(
@@ -569,6 +610,7 @@ def cmd_list(argv: list[str]) -> int:
                         "uptime": i.uptime,
                         "cwd": i.cwd,
                         "tcl": i.tcl,
+                        "rss": mem[i.name],
                         "log": str(i.log_path),
                     }
                     for i, status in rows
@@ -578,17 +620,42 @@ def cmd_list(argv: list[str]) -> int:
         )
         return EXIT_OK
 
-    if not rows:
-        print(f"no sessions in {registry.state_dir()}", file=sys.stderr)
-        return EXIT_OK
-
-    print(f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<8} {'UPTIME':>8}  CWD")
-    for info, status in rows:
+    if rows:
         print(
-            f"{info.name:<20} {info.port:>6} {info.pid:>8} {status:<8} "
-            f"{_fmt_uptime(info.uptime) if info.started else '-':>8}  {info.cwd}"
+            f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<9} {'UPTIME':>8} "
+            f"{'RSS':>6}  CWD"
         )
+        for info, status in rows:
+            print(
+                f"{info.name:<20} {info.port:>6} {info.pid:>8} {status:<9} "
+                f"{_fmt_uptime(info.uptime) if info.started else '-':>8} "
+                f"{procinfo.fmt_bytes(mem[info.name]):>6}  {info.cwd}"
+            )
+    else:
+        print(f"no sessions in {registry.state_dir()}", file=sys.stderr)
+    _print_memory_footer(list(mem.values()), strays)
     return EXIT_OK
+
+
+def _print_memory_footer(
+    session_rss: list[int | None], strays: list[procinfo.Stray]
+) -> None:
+    """Totals and unregistered Vivados, on stderr so the table stays parseable."""
+    sys.stdout.flush()  # so a terminal shows them under the table, not above
+    for stray in strays:
+        print(
+            f"not a session: pid {stray.pid} {procinfo.fmt_bytes(stray.rss)}  "
+            f"vivado {stray.args[:100]}",
+            file=sys.stderr,
+        )
+    held = sum(r or 0 for r in session_rss) + sum(s.rss for s in strays)
+    count = len(session_rss) + len(strays)
+    free = procinfo.mem_available()
+    if count or registry.sandboxed():
+        line = f"{count} Vivado(s) hold {procinfo.fmt_bytes(held)}"
+        if registry.sandboxed():
+            line += " (pids not visible from this sandbox)"
+        print(f"{line}; {procinfo.fmt_bytes(free)} available", file=sys.stderr)
 
 
 def cmd_log(argv: list[str]) -> int:

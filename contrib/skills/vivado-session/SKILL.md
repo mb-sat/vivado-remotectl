@@ -81,7 +81,11 @@ back afterwards. With more than one
 session live, name it with `-s` or set `VIVADO_REMOTECTL_SESSION`; guessing is
 an error that lists the candidates.
 
-Each session is its own Vivado holding its own design, so budget ~3 GB each.
+Each session is its own Vivado holding its own design, so budget 4-6 GB each
+once a design is synthesised. `vrc list` shows each one's `RSS` and, on
+stderr, the total and what is still available; `vrc start` refuses below 6 GB
+available (`--min-free GB` to change it), so there is no need to run a
+separate free-memory check first.
 
 ## Synthesise one IP out of context
 
@@ -247,7 +251,7 @@ Cancel only sessions you started, by name.
 
 ## Stop sessions before a full build
 
-Each session holds ~3 GB, and a project build script that sizes its job count
+Each session holds 4-6 GB, and a project build script that sizes its job count
 from `MemTotal` assumes it owns the host.
 
 ```bash
@@ -263,11 +267,11 @@ mid-run with no warning and no way for them to tell what happened. Stop
 sessions by the names you started them under, and reach for `--all` only when
 `vrc list` shows nothing you do not recognise.
 
-The reverse also catches people: **`vrc list` is not a census of Vivados on
-this machine.** Someone driving `vivado -mode batch` directly never registers,
-so an empty list does not mean the host is free — which matters before
-starting a build that sizes itself from `MemTotal`. Use the `ps` line below
-for that.
+The reverse also catches people: someone driving `vivado -mode batch` directly
+never registers as a session. `vrc list` reports such processes on stderr as
+`not a session: pid N`, with their memory, so read that part too before
+starting a build that sizes itself from `MemTotal`. From a sandboxed shell the
+pids are not visible and those lines are missing.
 
 `vrc stop` only signals a process whose recorded `/proc` start time still
 matches, so it cannot hit somebody else's Vivado on a recycled pid; an
