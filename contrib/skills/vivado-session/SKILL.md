@@ -47,8 +47,9 @@ A failing script prints Tcl's `errorInfo` to stderr and exits 1; the session
 survives with its state intact. Exit 3 means no session or an ambiguous one,
 4 a `--timeout` you set, 5 the session died, 6 `vrc cancel` stopped it.
 
-Scripts run inside **Vivado's Tcl 8.5.14**, not 8.6 — no `try`, `lmap`,
-`string cat` or `dict map` in anything you send.
+Vivado 2023.2 and older embed **Tcl 8.5**, 2024.1 onwards 8.6. Unless you know
+the session is a newer one (`vrc info` shows `tcl`), write 8.5: no `try`,
+`lmap`, `string cat` or `dict map` in anything you send.
 
 Keep scratch files in one directory named after the task rather than loose in
 `/tmp`; the examples below use `/tmp/vrc-timing/`.

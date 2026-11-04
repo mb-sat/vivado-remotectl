@@ -10,10 +10,11 @@
 #     status in {ok, err, proto}
 #
 # Constraints this file lives under:
-#   * Vivado 2023.2 embeds Tcl 8.5.14. No `try`, `lmap`, `string cat`,
+#   * Runs on Tcl 8.5 and 8.6: Vivado 2023.2 and older embed 8.5, 2024.1
+#     onwards 8.6, and the tests run both. No `try`, `lmap`, `string cat`,
 #     `dict map`, `binary encode`, `tailcall`, `coroutine`, `file tempfile`.
 #   * No Vivado-specific command on the core path, so the whole thing runs
-#     under a bare tclsh8.5 for tests.
+#     under a bare tclsh for tests.
 #
 # Environment (all optional):
 #   VRC_NAME       session name              (default vivado-<pid>)

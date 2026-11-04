@@ -22,7 +22,7 @@ from vivado_remotectl.cli import (
 @pytest.fixture
 def live(registry_dir, monkeypatch, tclsh):
     """A session reachable through the registry, as the CLI sees it."""
-    for key, value in tcl_env().items():
+    for key, value in tcl_env(tclsh).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("VRC_TEST_TCLSH", tclsh)
     info = launcher.start_session(

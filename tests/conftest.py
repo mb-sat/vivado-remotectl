@@ -1,8 +1,9 @@
 """Shared fixtures.
 
-The plugin is exercised on Vivado's own tclsh8.5, not the host's 8.6: Vivado
-2023.2 embeds Tcl 8.5.14, where `try`, `lmap` and friends do not exist, so
-testing against 8.6 would test an interpreter we never run on.
+The plugin is exercised on the tclsh each Vivado ships, not the host's: Vivado
+2023.2 and older embed Tcl 8.5, where `try`, `lmap` and friends do not exist,
+and 2024.1 onwards embed 8.6. Every test that runs the plugin runs once per
+interpreter, so code that only one of them accepts fails here first.
 """
 
 from __future__ import annotations
@@ -20,30 +21,41 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-VIVADO_ROOT = Path("/tools/Xilinx/Vivado/2023.2")
-TCLSH = VIVADO_ROOT / "bin/unwrapped/lnx64.o/tclsh8.5"
-TCL_LIB = VIVADO_ROOT / "tps/tcl/tcl8.5"
-LD_LIB = VIVADO_ROOT / "lib/lnx64.o"
+VIVADO = Path("/tools/Xilinx/Vivado")
+
+#: (test id, Vivado release that ships it, Tcl version, host fallback)
+INTERPRETERS = [
+    ("tcl8.5", "2023.2", "8.5", "tclsh8.5"),
+    ("tcl8.6", "2024.2", "8.6", "tclsh8.6"),
+]
 
 PLUGIN = REPO / "src/vivado_remotectl/tcl/vivado_remotectl.tcl"
 FAKE_VIVADO = REPO / "tests/fake_vivado.sh"
 
 
-def tcl_env() -> dict[str, str]:
-    """Environment that makes Vivado's bundled tclsh8.5 start cleanly."""
+def _interpreter(release: str, tcl: str, fallback: str) -> tuple[str, dict[str, str]] | None:
+    """The tclsh a Vivado release ships, with the environment it needs."""
+    root = VIVADO / release
+    tclsh = root / f"bin/unwrapped/lnx64.o/tclsh{tcl}"
+    if tclsh.exists():
+        return str(tclsh), {
+            "LD_LIBRARY_PATH": str(root / "lib/lnx64.o"),
+            "TCL_LIBRARY": str(root / f"tps/tcl/tcl{tcl}"),
+        }
+    host = shutil.which(fallback)
+    if host:
+        return host, {}
+    return None
+
+
+_TCL_ENV: dict[str, dict[str, str]] = {}
+
+
+def tcl_env(tclsh: str) -> dict[str, str]:
+    """Environment that makes this tclsh start cleanly."""
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = str(LD_LIB)
-    env["TCL_LIBRARY"] = str(TCL_LIB)
+    env.update(_TCL_ENV.get(tclsh, {}))
     return env
-
-
-def tclsh_path() -> str:
-    if TCLSH.exists():
-        return str(TCLSH)
-    fallback = shutil.which("tclsh8.5") or shutil.which("tclsh")
-    if fallback:
-        return fallback
-    pytest.skip("no tclsh available")
 
 
 @pytest.fixture(autouse=True)
@@ -56,9 +68,15 @@ def _outside_sandbox(monkeypatch):
     monkeypatch.delenv("SANDBOX_RUNTIME", raising=False)
 
 
-@pytest.fixture(scope="session")
-def tclsh() -> str:
-    return tclsh_path()
+@pytest.fixture(scope="session", params=INTERPRETERS, ids=[i[0] for i in INTERPRETERS])
+def tclsh(request) -> str:
+    _id, release, tcl, fallback = request.param
+    found = _interpreter(release, tcl, fallback)
+    if found is None:
+        pytest.skip(f"no tclsh{tcl} available")
+    path, extra = found
+    _TCL_ENV[path] = extra
+    return path
 
 
 @pytest.fixture
@@ -103,10 +121,10 @@ class TclSession:
 
 @pytest.fixture
 def tcl_session(tclsh, registry_dir, tmp_path):
-    """Start the plugin under tclsh8.5 on an ephemeral port."""
+    """Start the plugin under each tclsh on an ephemeral port."""
     name = "t"
     log_path = tmp_path / "session.log"
-    env = tcl_env()
+    env = tcl_env(tclsh)
     env.update(
         {
             "VRC_NAME": name,

@@ -1,4 +1,4 @@
-"""End-to-end against the real plugin running on Vivado's tclsh8.5."""
+"""End-to-end against the real plugin on the tclsh8.5 and tclsh8.6 Vivado ships."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def test_descriptor_is_complete_and_private(tcl_session, registry_dir):
     path = registry_dir / "t.session"
     assert info.port > 0
     assert len(info.token) == 32
-    assert info.tcl.startswith("8.5")
+    assert info.tcl.startswith(("8.5", "8.6"))
     assert oct(path.stat().st_mode)[-3:] == "600"
 
 
@@ -289,7 +289,7 @@ def test_name_collision_is_refused(tcl_session, registry_dir, tclsh):
 
     from conftest import tcl_env
 
-    env = tcl_env()
+    env = tcl_env(tclsh)
     env.update(
         {
             "VRC_NAME": "t",  # same name as the running fixture

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stands in for `vivado` in tests: accepts the flags the launcher passes and
-# runs the plugin on Vivado's own tclsh8.5, so the launch path is exercised
+# runs the plugin on the tclsh in $VRC_TEST_TCLSH, so the launch path is exercised
 # end to end (setsid, log redirection, readiness poll, killpg) with no Vivado.
 plugin=""
 while [ $# -gt 0 ]; do

@@ -302,8 +302,8 @@ Without `--vivado` or `--version`, `vrc` looks at `$VRC_VIVADO`, then
 
 ## How it is put together
 
-The Vivado side is one file of Tcl 8.5 — Vivado 2023.2 embeds 8.5.14, not 8.6
-— that opens a loopback socket and evaluates what arrives at global scope. The
+The Vivado side is one file of Tcl that runs on both 8.5 and 8.6 — Vivado
+2023.2 and older embed 8.5, 2024.1 onwards 8.6 — that opens a loopback socket and evaluates what arrives at global scope. The
 Python side is the CLI, with no third-party dependencies. Between them is a
 length-prefixed frame rather than JSON, so a multi-megabyte
 `report_* -return_string` needs no escaping and the Tcl side needs no JSON
@@ -334,12 +334,12 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The suite needs no Vivado and no hardware. It runs the real plugin on the
-`tclsh8.5` that ships inside Vivado, so the interpreter under test is the one
-production uses, and `tests/fake_vivado.sh` stands in for the executable so
+The suite needs no Vivado and no hardware. It runs the real plugin twice, on
+the `tclsh8.5` of Vivado 2023.2 and the `tclsh8.6` of 2024.2, so the
+interpreters under test are the ones production uses, and `tests/fake_vivado.sh` stands in for the executable so
 the whole launch path — `setsid`, log redirection, readiness polling, killing
-the process group — is exercised for real. If that interpreter is missing the
-suite skips rather than silently testing 8.6.
+the process group — is exercised for real. Where a Vivado is missing the host's
+`tclsh8.5` or `tclsh8.6` stands in, and with neither those tests skip.
 
 One path the tests cannot cover is a real synthesis. After a change to the
 plugin, check it by hand:

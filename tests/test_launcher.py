@@ -18,7 +18,7 @@ from vivado_remotectl.launcher import LaunchError
 
 @pytest.fixture
 def fake_vivado_env(monkeypatch, tclsh):
-    for key, value in tcl_env().items():
+    for key, value in tcl_env(tclsh).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("VRC_TEST_TCLSH", tclsh)
     return str(FAKE_VIVADO)
