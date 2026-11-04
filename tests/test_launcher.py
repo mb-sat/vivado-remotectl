@@ -18,7 +18,7 @@ from vivado_remotectl.launcher import LaunchError
 
 @pytest.fixture
 def fake_vivado_env(monkeypatch, tclsh):
-    for key, value in tcl_env().items():
+    for key, value in tcl_env(tclsh).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("VRC_TEST_TCLSH", tclsh)
     return str(FAKE_VIVADO)
@@ -43,7 +43,8 @@ def test_plugin_path_ships_inside_the_package():
 
 def test_child_env_identifies_the_session(tmp_path):
     env = launcher.child_env("x", 0, tmp_path)
-    assert env["VRC_SERVE"] == "1"
+    # Prompt mode, not a vwait: the only loop in which SIGINT cancels.
+    assert env["VRC_SERVE"] == "prompt"
     assert env["VRC_NAME"] == "x"
 
 
@@ -180,6 +181,59 @@ def test_stop_force_kills_the_process_group(registry_dir, fake_vivado_env):
     assert launcher.stop_session(info, force=True) == "killed"
     assert not registry.pid_alive(info.pid)
     assert not (registry_dir / "hard.session").exists()
+
+
+def test_started_session_is_under_the_prompt_loop(started):
+    # It answers at all only because tclsh keeps reading ::vrc::serve lines;
+    # the plugin does not vwait in prompt mode.
+    assert started.cancel == "sigint"
+    with Session(started) as client:
+        assert client.run("set ::vrc::serve_mode") == "prompt"
+
+
+def test_cancel_an_idle_session_sends_nothing(started):
+    assert launcher.cancel_session(started, wait=1.0) == "idle"
+    assert not launcher.cancel_marker(started).exists()
+    with Session(started) as client:
+        assert client.run("expr {1 + 1}") == "2"
+
+
+def test_cancel_refuses_a_session_without_the_prompt_loop(registry_dir):
+    import os
+
+    info = registry.SessionInfo(
+        name="gui", host="127.0.0.1", port=1, pid=os.getpid(), token="a" * 32,
+        starttime=registry.proc_starttime(os.getpid()),
+    )
+    # A vwait or GUI session: SIGINT there wedges it, so never send one.
+    with pytest.raises(launcher.CancelError, match="cannot be cancelled"):
+        launcher.cancel_session(info)
+
+
+def test_cancel_refuses_inside_the_sandbox(started, monkeypatch):
+    # The sandbox has its own pid namespace; the pid check would only say
+    # "gone", which reads as a dead session.
+    monkeypatch.setenv("SANDBOX_RUNTIME", "1")
+    with pytest.raises(launcher.CancelError, match="sandboxed"):
+        launcher.cancel_session(started)
+
+
+def test_cancel_refuses_a_recycled_pid(registry_dir, monkeypatch):
+    monkeypatch.delenv("SANDBOX_RUNTIME", raising=False)
+    import subprocess
+
+    victim = subprocess.Popen(["sleep", "30"])
+    try:
+        info = registry.SessionInfo(
+            name="stale", host="127.0.0.1", port=1, pid=victim.pid,
+            token="a" * 32, starttime="1", cancel="sigint",
+        )
+        with pytest.raises(launcher.CancelError, match="no longer"):
+            launcher.cancel_session(info)
+        assert victim.poll() is None
+    finally:
+        victim.kill()
+        victim.wait()
 
 
 def test_log_tail_returns_the_last_lines(tmp_path):

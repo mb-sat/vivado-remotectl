@@ -14,11 +14,13 @@ from .registry import (
     SANDBOX_HINT,
     RegistryError,
     SessionInfo,
+    current_owner,
     find,
     owns_pid,
     pid_alive,
     probe,
     proc_starttime,
+    remove_files,
     sandboxed,
     state_dir,
     validate_name,
@@ -83,13 +85,21 @@ def find_vivado(path: str | None = None, version: str | None = None) -> str:
     )
 
 
+#: What `vrc start` pipes into a -mode tcl Vivado. Each line hands the
+#: plugin's event loop half a second and returns to Vivado's prompt; see
+#: ``::vrc::serve`` in the plugin for why that, not a vwait, is what makes
+#: ``vrc cancel`` work.
+SERVE_LINE = "::vrc::serve"
+
+
 def child_env(name: str, port: int, directory: Path, serve: bool = True) -> dict[str, str]:
     env = dict(os.environ)
     env["VRC_NAME"] = name
     env["VRC_PORT"] = str(port)
     env["VRC_DIR"] = str(directory)
-    env["VRC_SERVE"] = "1" if serve else "0"
+    env["VRC_SERVE"] = "prompt" if serve else "0"
     env["VRC_AUTOSTART"] = "1"
+    env["VRC_OWNER"] = current_owner()
     return env
 
 
@@ -112,9 +122,15 @@ def start_session(
     wait: float = 180.0,
     extra_args: list[str] | None = None,
     directory: Path | None = None,
+    idle_stop: int = 0,
 ) -> SessionInfo:
-    """Launch a Vivado with the plugin loaded and wait until it answers."""
+    """Launch a Vivado with the plugin loaded and wait until it answers.
+
+    ``idle_stop`` seconds without a request make the session exit; 0 never.
+    """
     validate_name(name)
+    if idle_stop and gui:
+        raise LaunchError("--idle-stop does not apply to a GUI, which you close yourself")
     if sandboxed():
         raise LaunchError(f"not starting '{name}': {SANDBOX_HINT}")
     directory = directory or state_dir()
@@ -140,6 +156,14 @@ def start_session(
 
     # A GUI Vivado owns its own event loop, so the plugin must not vwait.
     env = child_env(name, port, directory, serve=not gui)
+    if idle_stop > 0:
+        env["VRC_IDLE_STOP"] = str(int(idle_stop))
+
+    if not gui:
+        # `yes` blocks on the full pipe, so the stream costs nothing, and it
+        # dies of SIGPIPE when Vivado exits. Both sit in the one process
+        # group that start_new_session gives the shell.
+        argv = ["sh", "-c", f'yes {SERVE_LINE} | exec "$@"', "sh", *argv]
 
     with open(log_path, "ab") as log, open(os.devnull, "rb") as devnull:
         log.write(
@@ -290,9 +314,65 @@ def stop_session(
         # rather than risk hitting an unrelated Vivado that reused the pid.
         outcome = "left-running (cannot verify pid)"
 
-    if info.path:
-        try:
-            info.path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    remove_files(info)
     return outcome
+
+
+class CancelError(Exception):
+    pass
+
+
+def cancel_marker(info: SessionInfo) -> Path:
+    """The file the plugin checks to label a cancelled request as such."""
+    base = info.path.parent if info.path else state_dir()
+    return base / f"{info.name}.cancel"
+
+
+def cancel_session(info: SessionInfo, *, wait: float = 60.0) -> str:
+    """SIGINT the session so Vivado cancels its running command.
+
+    Returns "cancelled", "idle" when nothing was running, "still-busy" when
+    the session has not come back within ``wait`` seconds, or "died" when
+    Vivado exited instead -- 2023.2 has been seen to segfault in the router
+    on one route_design cancel in thirteen.
+
+    Only sessions whose descriptor says ``cancel sigint`` are signalled.
+    Anything else -- a GUI, a Vivado attached via Vivado_init.tcl, a session
+    from before prompt mode -- sits in a vwait or a GUI loop, where a
+    SIGINT cancels the command but wedges the session for good.
+    """
+    if info.cancel != "sigint":
+        raise CancelError(
+            f"session '{info.name}' cannot be cancelled: only sessions "
+            f"started by `vrc start` (not --gui) support it; restart it"
+        )
+    if sandboxed():
+        raise CancelError(f"not cancelling '{info.name}': {SANDBOX_HINT}")
+    if not owns_pid(info):
+        raise CancelError(
+            f"session '{info.name}': pid {info.pid} is gone or no longer "
+            f"the process this descriptor describes"
+        )
+    if probe(info) == "idle":
+        return "idle"
+
+    marker = cancel_marker(info)
+    marker.touch()
+    # The pid alone, never the group: the group also holds the `yes` that
+    # feeds Vivado's prompt and the sh around it, and losing either ends
+    # the session at its next prompt read.
+    try:
+        os.kill(info.pid, signal.SIGINT)
+    except OSError as exc:
+        marker.unlink(missing_ok=True)
+        raise CancelError(f"cannot signal pid {info.pid}: {exc}") from None
+
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        _reap(info.pid)
+        if not pid_alive(info.pid):
+            return "died"
+        if probe(info, timeout=1.0) == "idle":
+            return "cancelled"
+        time.sleep(0.5)
+    return "still-busy"

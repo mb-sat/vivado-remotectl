@@ -10,17 +10,23 @@
 #     status in {ok, err, proto}
 #
 # Constraints this file lives under:
-#   * Vivado 2023.2 embeds Tcl 8.5.14. No `try`, `lmap`, `string cat`,
+#   * Runs on Tcl 8.5 and 8.6: Vivado 2023.2 and older embed 8.5, 2024.1
+#     onwards 8.6, and the tests run both. No `try`, `lmap`, `string cat`,
 #     `dict map`, `binary encode`, `tailcall`, `coroutine`, `file tempfile`.
 #   * No Vivado-specific command on the core path, so the whole thing runs
-#     under a bare tclsh8.5 for tests.
+#     under a bare tclsh for tests.
 #
 # Environment (all optional):
 #   VRC_NAME       session name              (default vivado-<pid>)
 #   VRC_PORT       port to bind, 0 = any     (default 0)
 #   VRC_DIR        session registry dir      (default per XDG, see _state_dir)
 #   VRC_SERVE      1 -> `vwait` at the end; keeps a -mode tcl Vivado alive
+#                  prompt -> define ::vrc::serve and return to Vivado's prompt,
+#                  which `vrc start` feeds an endless `::vrc::serve` stream.
+#                  Only this mode can be cancelled, see ::vrc::serve.
 #   VRC_AUTOSTART  0 -> define procs but do not bind
+#   VRC_OWNER      who started the session, recorded in the descriptor
+#   VRC_IDLE_STOP  seconds; exit after this long without a request (0 = never)
 # ==============================================================================
 
 namespace eval ::vrc {
@@ -34,6 +40,9 @@ namespace eval ::vrc {
     if {![info exists dir]}      { variable dir      "" }
     if {![info exists sessfile]} { variable sessfile "" }
     if {![info exists forever]}  { variable forever  0  }
+    if {![info exists tick]}     { variable tick     0  }
+    if {![info exists active]}   { variable active   [clock seconds] }
+    if {![info exists idle_stop]} { variable idle_stop 0 }
 
     # Per-channel byte accumulator, and the set of channels whose peer has
     # closed its write side but which may still hold a complete request.
@@ -43,6 +52,12 @@ namespace eval ::vrc {
     variable MAX_HEADER  128
     variable MAX_PAYLOAD [expr {256 * 1024 * 1024}]
     variable VERSION     "V1"
+
+    # Liveness checks the client sends: `vrc list` and `vrc wait` (expr 1),
+    # the readiness poll of `vrc start` (info patchlevel) and `vrc ping`.
+    # They are not recorded as the last result and do not count as activity,
+    # or `vrc list` would overwrite the result it is meant to help recover.
+    variable QUIET [list "expr 1" "info patchlevel" "version -short"]
 }
 
 # ------------------------------------------------------------------------------
@@ -208,6 +223,18 @@ proc ::vrc::_write_session {} {
     puts $f "tcl [info patchlevel]"
     puts $f "started [clock seconds]"
     puts $f "cwd [pwd]"
+    # Who started it, so `vrc stop --mine` and `--all` can tell sessions
+    # apart on a shared host. Set by `vrc start`; absent when attached.
+    set owner [::vrc::_env VRC_OWNER ""]
+    if {$owner ne ""} { puts $f "owner $owner" }
+    variable idle_stop
+    if {$idle_stop > 0} { puts $f "idle_stop $idle_stop" }
+    # Tells the client this plugin writes <name>.running and <name>.result.
+    puts $f "results 1"
+    if {[::vrc::_env VRC_SERVE 0] eq "prompt"} {
+        # Tells `vrc cancel` that a SIGINT here cancels rather than wedges.
+        puts $f "cancel sigint"
+    }
     close $f
     catch {file attributes $tmp -permissions 0600}
     file rename -force $tmp $sessfile
@@ -217,7 +244,69 @@ proc ::vrc::_rm_session {} {
     variable sessfile
     if {$sessfile ne ""} {
         catch {file delete -force $sessfile}
+        ::vrc::_rm_sidecars
     }
+}
+
+# The per-request files beside the descriptor; see _record_start.
+proc ::vrc::_sidecar {ext} {
+    variable dir
+    variable name
+    return [file join $dir "$name.$ext"]
+}
+
+proc ::vrc::_rm_sidecars {} {
+    foreach ext {running result} {
+        catch {file delete -force [::vrc::_sidecar $ext]}
+    }
+}
+
+# Write a file beside the descriptor atomically, mode 0600. `bytes` is
+# already bytes; the result of a script may be a multi-megabyte report.
+proc ::vrc::_write_sidecar {ext bytes} {
+    set path [::vrc::_sidecar $ext]
+    set tmp "$path.[pid].tmp"
+    if {[catch {
+        set f [open $tmp {WRONLY CREAT TRUNC} 0600]
+        fconfigure $f -translation binary
+        puts -nonewline $f $bytes
+        close $f
+        file rename -force $tmp $path
+    } err]} {
+        catch {close $f}
+        catch {file delete -force $tmp}
+        ::vrc::_log "cannot write $path: $err"
+    }
+}
+
+# ------------------------------------------------------------------------------
+# What a session is doing, kept on disk so it survives the client.
+#
+# A client that dies mid-synthesis -- an agent's shell torn down, a laptop
+# lid closed -- used to take the result with it, and the only way back was to
+# rerun the half hour. Now <name>.running says what is executing and since
+# when, and <name>.result holds the reply to the last request, so `vrc wait`
+# and `vrc result` can hand it over later. Both formats are in
+# docs/protocol.md.
+# ------------------------------------------------------------------------------
+proc ::vrc::_record_start {started script} {
+    set first ""
+    foreach line [split $script "\n"] {
+        set line [string trim $line]
+        if {$line ne ""} { set first $line; break }
+    }
+    if {[string length $first] > 200} {
+        set first "[string range $first 0 196]..."
+    }
+    ::vrc::_write_sidecar running \
+        [encoding convertto utf-8 "started $started\n$first\n"]
+}
+
+proc ::vrc::_record_end {started status text} {
+    set payload [encoding convertto utf-8 $text]
+    ::vrc::_write_sidecar result \
+        "$status [string length $payload] $started [clock seconds]\n$payload"
+    catch {file delete -force [::vrc::_sidecar running]}
 }
 
 # ------------------------------------------------------------------------------
@@ -375,21 +464,99 @@ proc ::vrc::_trim_errorinfo {info} {
 # ------------------------------------------------------------------------------
 proc ::vrc::_exec {chan script} {
     variable busy
+    variable QUIET
 
     set busy 1
+    set started [clock seconds]
+    set record [expr {[lsearch -exact $QUIET [string trim $script]] < 0}]
+    if {$record} { ::vrc::_record_start $started $script }
     set rc [catch {uplevel #0 $script} res opts]
     set busy 0
+    if {$record} { set ::vrc::active [clock seconds] }
+
+    # `vrc cancel` drops this marker before its SIGINT. Vivado's own message
+    # for a cancelled command is an empty one, so the marker is the only way
+    # to tell the waiting client what happened.
+    set cancelled [::vrc::_take_cancel_marker $started]
 
     # rc 2 is TCL_RETURN: a script ending in `return "WNS=..."` is the
     # documented idiom for getting a value out, so it is a success.
     if {$rc == 0 || $rc == 2} {
-        ::vrc::_respond $chan ok $res
+        set status ok
+        set detail $res
     } else {
+        set status err
         set detail $res
         catch {set detail [dict get $opts -errorinfo]}
-        ::vrc::_respond $chan err [::vrc::_trim_errorinfo $detail]
+        set detail [::vrc::_trim_errorinfo $detail]
+        if {$cancelled} {
+            set detail "cancelled by vrc cancel\n[string trimleft $detail \n]"
+        }
     }
+    # Record before answering, so a client that reads the result file as
+    # soon as its reply arrives never sees the previous one.
+    if {$record} { ::vrc::_record_end $started $status $detail }
+    ::vrc::_respond $chan $status $detail
     after idle ::vrc::_pump
+}
+
+proc ::vrc::_cancel_marker {} {
+    variable dir
+    variable name
+    return [file join $dir "$name.cancel"]
+}
+
+# Delete the marker and return whether it was written during this request.
+# Called after every request, and the mtime check covers the race where the
+# command finished just before the SIGINT: the marker is then older than the
+# next request and must not label that one's own error.
+proc ::vrc::_take_cancel_marker {started} {
+    set marker [::vrc::_cancel_marker]
+    if {[catch {file mtime $marker} mtime]} { return 0 }
+    catch {file delete -force $marker}
+    return [expr {$mtime >= $started}]
+}
+
+# ------------------------------------------------------------------------------
+# One slice of event loop, then back to Vivado's prompt.
+#
+# This is what makes a session cancellable. Vivado answers SIGINT by
+# cancelling the running synth_design / place_design / route_design, but the
+# interrupt only clears once control is back at its top-level prompt. Under
+# the `vwait` at the bottom of this file it never gets there: the cancelled
+# command's error escapes our `catch`, no response is sent, `busy` stays set
+# and every later callback fails the same way. So `vrc start` pipes
+# `yes ::vrc::serve` into Vivado instead, and the prompt runs this over and
+# over; the socket is only serviced inside it. The slice length only bounds
+# how long an idle SIGINT stays pending, which is harmless either way.
+# ------------------------------------------------------------------------------
+proc ::vrc::serve {} {
+    set id [after 500 {set ::vrc::tick 1}]
+    vwait ::vrc::tick
+    after cancel $id
+}
+
+# ------------------------------------------------------------------------------
+# Exit once nobody has sent a request for `idle_stop` seconds.
+#
+# Opt-in through `vrc start --idle-stop`, for the session that gets forgotten
+# and holds 5 GB overnight. Liveness checks do not count as use (see QUIET),
+# or a `vrc list` would keep every session alive. The timer also fires when a
+# running script re-enters the event loop, as wait_on_run does; `busy` keeps
+# that from ending a session in the middle of its work.
+# ------------------------------------------------------------------------------
+proc ::vrc::_idle_check {} {
+    variable busy
+    variable active
+    variable idle_stop
+
+    set idle [expr {[clock seconds] - $active}]
+    if {!$busy && $idle >= $idle_stop} {
+        ::vrc::_log "no request for ${idle}s (--idle-stop $idle_stop); exiting"
+        exit 0
+    }
+    set left [expr {$busy ? $idle_stop : $idle_stop - $idle}]
+    after [expr {1000 * ($left < 60 ? $left : 60) + 100}] ::vrc::_idle_check
 }
 
 # ------------------------------------------------------------------------------
@@ -433,6 +600,7 @@ proc ::vrc::start {} {
     variable token
     variable dir
     variable sessfile
+    variable idle_stop
 
     if {$sock ne ""} { return $port }
 
@@ -443,6 +611,9 @@ proc ::vrc::start {} {
     if {![::vrc::_claim_session]} {
         return -code error "session '$name' is already live in $dir"
     }
+    # A session of this name that died hard left its last result behind;
+    # this one must not hand that out as its own.
+    ::vrc::_rm_sidecars
     if {[catch {socket -server ::vrc::_accept -myaddr 127.0.0.1 $reqport} s]} {
         ::vrc::_rm_session
         set sessfile ""
@@ -451,7 +622,10 @@ proc ::vrc::start {} {
     set sock  $s
     set port  [lindex [fconfigure $sock -sockname] 2]
     set token [::vrc::_token]
+    set idle_stop [::vrc::_env VRC_IDLE_STOP 0]
+    if {![string is integer -strict $idle_stop] || $idle_stop < 0} { set idle_stop 0 }
     ::vrc::_write_session
+    if {$idle_stop > 0} { after 1000 ::vrc::_idle_check }
     ::vrc::_log "session '$name' listening on 127.0.0.1:$port (pid [pid])"
     return $port
 }
@@ -496,16 +670,18 @@ if {[info commands ::vrc::_orig_exit] eq ""} {
 }
 
 if {[string is true -strict [::vrc::_env VRC_AUTOSTART 1]]} {
+    set ::vrc::serve_mode [::vrc::_env VRC_SERVE 0]
     if {[catch {::vrc::start} err]} {
         ::vrc::_log "start failed: $err"
-        if {[string is true -strict [::vrc::_env VRC_SERVE 0]]} {
+        if {[string is true -strict $::vrc::serve_mode] || $::vrc::serve_mode eq "prompt"} {
             exit 1
         }
-    } elseif {[string is true -strict [::vrc::_env VRC_SERVE 0]]} {
-        # Launched by `vrc start`: Vivado's stdin is /dev/null, so without a
-        # vwait here -mode tcl would hit EOF and exit immediately. A GUI or
-        # interactive Vivado must NOT take this branch -- it already owns an
-        # event loop, and blocking here would freeze the UI.
+    } elseif {[string is true -strict $::vrc::serve_mode]} {
+        # Stdin is /dev/null, so without a vwait here -mode tcl would hit EOF
+        # and exit immediately. A GUI or interactive Vivado must NOT take
+        # this branch -- it already owns an event loop, and blocking here
+        # would freeze the UI. In prompt mode we return instead, and
+        # Vivado's prompt keeps calling ::vrc::serve.
         vwait ::vrc::forever
         ::vrc::stop
     }

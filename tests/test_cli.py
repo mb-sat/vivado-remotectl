@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from conftest import FAKE_VIVADO, tcl_env
 
 from vivado_remotectl import launcher, registry
 from vivado_remotectl.cli import (
+    EXIT_CANCELLED,
     EXIT_DIED,
     EXIT_NO_SESSION,
     EXIT_OK,
@@ -21,7 +24,7 @@ from vivado_remotectl.cli import (
 @pytest.fixture
 def live(registry_dir, monkeypatch, tclsh):
     """A session reachable through the registry, as the CLI sees it."""
-    for key, value in tcl_env().items():
+    for key, value in tcl_env(tclsh).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("VRC_TEST_TCLSH", tclsh)
     info = launcher.start_session(
@@ -149,6 +152,19 @@ def test_timeout_exits_four_and_says_where_it_is_still_running(live, capsys):
     err = capsys.readouterr().err
     assert "timed out" in err
     assert "vrc log -f cli" in err
+    assert "vrc cancel cli" in err
+
+
+def test_a_cancelled_request_exits_six(live, registry_dir, capsys):
+    marker = registry_dir / "cli.cancel"
+    script = f'close [open {{{marker}}} w]; error ""'
+    assert main(["-e", script, "--no-tail"]) == EXIT_CANCELLED
+    assert capsys.readouterr().err.startswith("cancelled by vrc cancel")
+
+
+def test_cancel_with_nothing_running(live, capsys):
+    assert main(["cancel", "cli"]) == EXIT_OK
+    assert capsys.readouterr().out == "cli: nothing running\n"
 
 
 def test_explicit_port_bypasses_the_registry(live, capsys):
@@ -219,3 +235,242 @@ def test_prune_removes_a_dead_descriptor(live, registry_dir, capsys):
     )
     assert main(["list", "--prune"]) == EXIT_OK
     assert not (registry_dir / "dead.session").exists()
+
+
+# -- results that outlive the client -----------------------------------------
+
+
+def test_result_prints_the_last_one(live, capsys):
+    assert main(["-e", "return first"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["result", "cli"]) == EXIT_OK
+    assert capsys.readouterr().out == "first\n"
+
+
+def test_result_keeps_the_exit_code_of_an_error(live, capsys):
+    assert main(["-e", "error kaboom"]) == EXIT_TCL_ERROR
+    capsys.readouterr()
+    assert main(["result"]) == EXIT_TCL_ERROR
+    assert capsys.readouterr().err.startswith("kaboom")
+
+
+def test_result_before_anything_ran(live, capsys):
+    assert main(["result"]) == EXIT_NO_SESSION
+    assert "no recorded result" in capsys.readouterr().err
+
+
+def test_detach_then_wait(live, capsys):
+    assert main(["-s", "cli", "--detach", "-e", "after 1000; return late"]) == EXIT_OK
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "vrc wait cli" in out.err
+    assert registry.probe(live) == registry.BUSY
+    assert main(["wait", "cli"]) == EXIT_OK
+    assert capsys.readouterr().out == "late\n"
+
+
+def test_detach_refuses_a_busy_session(live, capsys):
+    assert main(["--detach", "-e", "after 2000"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["--detach", "-e", "return second"]) == EXIT_NO_SESSION
+    err = capsys.readouterr().err
+    assert "busy: after 2000" in err
+    assert main(["wait"]) == EXIT_OK
+
+
+def test_wait_times_out_naming_the_script(live, capsys):
+    assert main(["--detach", "-e", "after 3000"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["wait", "--timeout", "0.5"]) == EXIT_TIMEOUT
+    assert "after 3000" in capsys.readouterr().err
+    assert main(["wait"]) == EXIT_OK
+
+
+def test_result_while_busy_says_a_newer_one_is_running(live, capsys):
+    assert main(["-e", "return old"]) == EXIT_OK
+    assert main(["--detach", "-e", "after 2000; return new"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["result"]) == EXIT_OK
+    out = capsys.readouterr()
+    assert out.out == "old\n"
+    assert "vrc wait cli" in out.err
+    assert main(["wait"]) == EXIT_OK
+    assert capsys.readouterr().out == "new\n"
+
+
+def test_wait_on_an_idle_session_returns_at_once(live, capsys):
+    assert main(["-e", "return done"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["wait", "--timeout", "2"]) == EXIT_OK
+    assert capsys.readouterr().out == "done\n"
+
+
+# -- memory --------------------------------------------------------------------
+
+
+def test_list_shows_memory_per_session_and_in_total(live, capsys):
+    import json
+
+    assert main(["list"]) == EXIT_OK
+    out = capsys.readouterr()
+    header, row = out.out.splitlines()[:2]
+    assert "RSS" in header
+    assert row.split()[6].endswith(("M", "G"))
+    assert "1 Vivado(s) hold" in out.err
+    assert "available" in out.err
+    assert main(["list", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)[0]["rss"] > 0
+
+
+def test_start_refuses_when_memory_is_short(registry_dir, capsys):
+    assert main(["start", "big", "--min-free", "1e9"]) == EXIT_NO_SESSION
+    err = capsys.readouterr().err
+    assert "not starting 'big'" in err
+    assert "--min-free 0" in err
+    assert not (registry_dir / "big.session").exists()
+
+
+# -- owners ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def foreign(live, registry_dir, monkeypatch):
+    """A second session, started by somebody else."""
+    monkeypatch.setenv("VRC_OWNER", "claude:someone-else")
+    info = launcher.start_session(
+        "other", vivado=str(FAKE_VIVADO), wait=60.0, directory=registry_dir
+    )
+    monkeypatch.delenv("VRC_OWNER")
+    yield info
+    if registry.owns_pid(info):
+        launcher.stop_session(info, force=True)
+
+
+def test_start_records_the_owner(live):
+    assert registry.find("cli").owner == registry.current_owner()
+
+
+def test_owner_comes_from_the_claude_session(monkeypatch):
+    monkeypatch.delenv("VRC_OWNER", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "0123456789abcdef")
+    assert registry.current_owner() == "claude:0123456789abcdef"
+    assert registry.short_owner("claude:0123456789abcdef") == "claude:01234567"
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    assert registry.current_owner().startswith("user:")
+
+
+def test_list_mine_and_the_owner_column(foreign, capsys):
+    assert main(["list"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "OWNER" in out and "claude:someone-" in out
+    assert main(["list", "--mine"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "cli" in out and "other" not in out
+
+
+def test_stop_mine_leaves_other_sessions(foreign, capsys):
+    assert main(["stop", "--mine"]) == EXIT_OK
+    assert capsys.readouterr().out == "cli: stopped\n"
+    assert registry.find("other") is not None
+    assert registry.probe(foreign) == registry.IDLE
+
+
+def test_stop_all_spares_somebody_elses_busy_session(foreign, capsys):
+    assert main(["-s", "other", "--detach", "-e", "after 3000"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["stop", "--all"]) == EXIT_TCL_ERROR
+    out = capsys.readouterr()
+    assert "cli: stopped" in out.out
+    assert "other: left running" in out.err
+    assert registry.probe(foreign) == registry.BUSY
+    assert main(["wait", "other"]) == EXIT_OK
+
+
+def test_stop_all_takes_somebody_elses_idle_session(foreign, capsys):
+    assert main(["stop", "--all"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "cli: stopped" in out and "other: stopped" in out
+
+
+# -- idle time -------------------------------------------------------------------
+
+
+def test_list_shows_how_long_it_has_been_idle_or_busy(live, capsys):
+    import json
+
+    assert main(["-e", "return x"]) == EXIT_OK
+    assert main(["--detach", "-e", "after 2500"]) == EXIT_OK
+    time.sleep(1.2)
+    capsys.readouterr()
+    assert main(["list", "--json"]) == EXIT_OK
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["status"] == "busy" and row["for"] >= 1
+    assert main(["wait"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["list"]) == EXIT_OK
+    header, line = capsys.readouterr().out.splitlines()[:2]
+    assert header.split()[4] == "FOR"
+    status, took = line.split()[3:5]
+    assert status == "idle" and took in ("0s", "1s", "2s")
+
+
+def test_idle_stop_parses_durations():
+    from vivado_remotectl.cli import _duration
+
+    assert [_duration(t) for t in ("90", "90s", "45m", "2h", "1.5h")] == [
+        90, 90, 2700, 7200, 5400,
+    ]
+
+
+def test_start_passes_idle_stop_to_the_session(registry_dir, monkeypatch, tclsh, capsys):
+    for key, value in tcl_env(tclsh).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("VRC_TEST_TCLSH", tclsh)
+    monkeypatch.setenv("VRC_VIVADO", str(FAKE_VIVADO))
+    assert main(["start", "brief", "--idle-stop", "1h", "--min-free", "0"]) == EXIT_OK
+    try:
+        assert registry.find("brief").idle_stop == 3600
+        capsys.readouterr()
+        assert main(["info", "brief"]) == EXIT_OK
+        assert "1h00m" in capsys.readouterr().out
+    finally:
+        assert main(["stop", "brief"]) == EXIT_OK
+
+
+# -- the misses people make ------------------------------------------------------
+
+
+def test_status_is_list(live, capsys):
+    assert main(["status"]) == EXIT_OK
+    assert "cli" in capsys.readouterr().out
+
+
+def test_version_of_vrc_itself(capsys):
+    from vivado_remotectl import __version__
+
+    assert main(["--version"]) == EXIT_OK
+    assert capsys.readouterr().out == f"vrc {__version__}\n"
+
+
+def test_a_start_option_on_an_eval_says_so(capsys):
+    assert main(["-s", "x", "--version", "2023.2", "-e", "expr 1"]) == EXIT_USAGE
+    assert "--version is an option of 'vrc start'" in capsys.readouterr().err
+    assert main(["--cwd", "/tmp", "-e", "expr 1"]) == EXIT_USAGE
+    assert "-e 'cd DIR'" in capsys.readouterr().err
+
+
+def test_tcl_without_e_suggests_it(capsys):
+    argv = ["-s", "x", "llength", "[get_cells -hier]"]
+    assert main(argv) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "vrc -e 'llength [get_cells -hier]'" in err
+
+
+def test_an_unknown_option_is_named(capsys):
+    assert main(["-log", "x.log", "-e", "expr 1"]) == EXIT_USAGE
+    assert "unknown option '-log'" in capsys.readouterr().err
+
+
+def test_a_missing_name_lists_the_sessions_there_are(live, capsys):
+    assert main(["-s", "rw", "-e", "expr 1"]) == EXIT_NO_SESSION
+    assert "there are: cli" in capsys.readouterr().err

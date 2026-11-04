@@ -74,6 +74,15 @@ class SessionInfo:
     #: /proc start time of the session process, used to prove a pid has not
     #: been recycled before we signal it. Empty for older descriptors.
     starttime: str = ""
+    #: How a running command can be cancelled: "sigint" for sessions that
+    #: `vrc start` put under Vivado's prompt loop, empty when it cannot be.
+    cancel: str = ""
+    #: The plugin keeps <name>.running and <name>.result; older ones do not.
+    results: bool = False
+    #: Who started it, see :func:`current_owner`. Empty when attached.
+    owner: str = ""
+    #: Seconds without a request after which the session exits; 0 never.
+    idle_stop: int = 0
     path: Path | None = None
 
     @property
@@ -81,6 +90,11 @@ class SessionInfo:
         """Derived by convention, so the plugin never has to write it."""
         base = self.path.parent if self.path else state_dir()
         return base / f"{self.name}.log"
+
+    def sidecar(self, ext: str) -> Path:
+        """A file the plugin keeps beside the descriptor, e.g. ``result``."""
+        base = self.path.parent if self.path else state_dir()
+        return base / f"{self.name}.{ext}"
 
     @property
     def uptime(self) -> int:
@@ -113,6 +127,10 @@ def read_session_file(path: Path) -> SessionInfo | None:
             cwd=fields.get("cwd", ""),
             tcl=fields.get("tcl", ""),
             starttime=fields.get("starttime", ""),
+            cancel=fields.get("cancel", ""),
+            results=fields.get("results", "") == "1",
+            owner=fields.get("owner", ""),
+            idle_stop=int(fields.get("idle_stop", 0) or 0),
             path=path,
         )
     except (KeyError, ValueError):
@@ -133,6 +151,112 @@ def list_sessions(directory: Path | None = None) -> list[SessionInfo]:
         if info is not None:
             out.append(info)
     return out
+
+
+@dataclass
+class Running:
+    """What a busy session is executing, from ``<name>.running``."""
+
+    started: int
+    first_line: str
+
+
+@dataclass
+class LastResult:
+    """The reply to the last request a session finished, from ``<name>.result``."""
+
+    status: str  # "ok" or "err", as on the wire
+    text: str
+    started: int
+    finished: int
+
+
+def read_running(info: SessionInfo) -> Running | None:
+    try:
+        text = info.sidecar("running").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    head, _, rest = text.partition("\n")
+    key, _, value = head.partition(" ")
+    if key != "started" or not value.isdigit():
+        return None
+    return Running(int(value), rest.strip())
+
+
+def read_result(info: SessionInfo) -> LastResult | None:
+    """Parse ``<status> <nbytes> <started> <finished>\\n<payload>``."""
+    try:
+        data = info.sidecar("result").read_bytes()
+    except OSError:
+        return None
+    head, sep, payload = data.partition(b"\n")
+    parts = head.decode("ascii", errors="replace").split()
+    if not sep or len(parts) != 4 or not all(x.isdigit() for x in parts[1:]):
+        return None
+    status, nbytes, started, finished = parts[0], *map(int, parts[1:])
+    if len(payload) != nbytes:
+        return None
+    return LastResult(status, payload.decode("utf-8", errors="replace"), started, finished)
+
+
+def last_change(info: SessionInfo, status: str) -> int | None:
+    """When the session last went idle or busy, as epoch seconds.
+
+    Busy: when the running script started. Idle: when the last request
+    finished, else when the session started. None when it cannot be told.
+    """
+    if status == BUSY:
+        running = read_running(info)
+        return running.started if running else None
+    if status == IDLE:
+        last = read_result(info)
+        if last is not None:
+            return last.finished
+        return info.started or None
+    return None
+
+
+def remove_files(info: SessionInfo) -> None:
+    """Delete the descriptor and the plugin's per-request files."""
+    paths = [info.path] if info.path else []
+    paths += [info.sidecar(ext) for ext in ("running", "result")]
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def current_owner() -> str:
+    """Who is asking: the owner recorded by a `vrc start` from this shell.
+
+    ``$VRC_OWNER`` if set, else the Claude Code session (whose subagents share
+    its id), else the user. Several agents on one host each see only their
+    own sessions as theirs; a human sees every session they started by hand.
+    """
+    explicit = os.environ.get("VRC_OWNER")
+    if explicit:
+        return explicit
+    claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if claude:
+        return f"claude:{claude}"
+    try:
+        import pwd
+
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        user = os.environ.get("USER", str(os.getuid()))
+    return f"user:{user}"
+
+
+def short_owner(owner: str) -> str:
+    """``claude:<uuid>`` cut to eight characters of the id, for tables."""
+    if not owner:
+        return "-"
+    kind, _, ident = owner.partition(":")
+    if kind == "claude":
+        return f"claude:{ident[:8]}"
+    return owner[:20]
 
 
 def sandboxed() -> bool:
@@ -237,12 +361,8 @@ def prune(directory: Path | None = None) -> list[str]:
     removed = []
     for info in list_sessions(directory):
         if probe(info) == DEAD and not owns_pid(info):
-            try:
-                if info.path:
-                    info.path.unlink()
-                removed.append(info.name)
-            except OSError:
-                pass
+            remove_files(info)
+            removed.append(info.name)
     return removed
 
 
@@ -263,7 +383,9 @@ def resolve(name: str | None = None, directory: Path | None = None) -> SessionIn
     if name:
         info = find(name, directory)
         if info is None:
-            raise RegistryError(f"no session named {name!r} in {directory}")
+            have = sorted(s.name for s in list_sessions(directory))
+            known = f"; there are: {', '.join(have)}" if have else "; there are none"
+            raise RegistryError(f"no session named {name!r} in {directory}{known}")
         return info
 
     sessions = list_sessions(directory)

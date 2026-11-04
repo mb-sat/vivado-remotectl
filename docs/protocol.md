@@ -35,7 +35,8 @@ land here, because a script ending in `return "WNS=..."` is a success.
 `err`
 : the script raised; the payload is `$::errorInfo`, whose first line is the
 message and the rest the Tcl traceback. The session is unharmed and keeps its
-state.
+state. A request stopped by `vrc cancel` is an `err` whose first line is
+`cancelled by vrc cancel`.
 
 `proto`
 : the frame was malformed or the token was wrong. The server closes the
@@ -86,7 +87,8 @@ running Vivado, which includes `exec`.
 
 `<state-dir>/<name>.session`, mode `0600`, written atomically by the plugin
 and read by everyone else. Flat `key value` lines, one per line — the format
-is this plain so that the Tcl side, which is the only writer, needs no encoder:
+is this plain so that the Tcl side, which is the only writer, needs no encoder,
+and readers ignore keys they do not know:
 
 ```
 v 1
@@ -99,6 +101,10 @@ token def737ecb7496f5f78f93e415c5bf371
 tcl 8.5.14
 started 1789698682
 cwd /home/you/rtl
+results 1
+owner claude:4f0c1a2e-7d1b-4c55-9a3e-1f2b3c4d5e6f
+idle_stop 7200
+cancel sigint
 ```
 
 `port` is the port actually bound, which matters because the default request
@@ -111,6 +117,46 @@ The name is claimed with an `O_EXCL` create, so two simultaneous `vrc start`s
 for the same name cannot both win. The log path is not stored — it is
 `<name>.log` beside the descriptor, by convention, which keeps the plugin the
 only writer and leaves nothing to drift.
+
+`owner` is whoever ran `vrc start`, from `$VRC_OWNER` in the plugin's
+environment; a Vivado attached through `Vivado_init.tcl` has none. Clients use
+it to keep `vrc stop --all` off a busy session someone else started.
+
+`idle_stop` is the number of seconds without a request after which the
+plugin exits by itself, set by `vrc start --idle-stop`; absent means never.
+The liveness checks listed under *What ran last* do not count as requests.
+
+`cancel sigint` is present only in a session running under Vivado's prompt
+loop, which is what `vrc start` sets up without `--gui`. It means a SIGINT to
+`pid` cancels the running command and the session stays usable. A client must
+not send SIGINT to a session without it: in a `vwait` or a GUI the session
+stops answering for good. Before the signal, a client creates
+`<state-dir>/<name>.cancel`. When the request ends with an error and the file
+is no older than the request, the plugin puts the `cancelled by vrc cancel`
+line in front of the traceback; it deletes the file after every request either
+way.
+
+## What ran last
+
+`results 1` in the descriptor means the plugin keeps two more files beside it,
+both `0600` and written atomically, so a result outlives the client that asked
+for it:
+
+`<name>.running`
+: exists only while a request executes. `started <epoch seconds>`, then the
+first non-blank line of the script, cut at 200 characters.
+
+`<name>.result`
+: the reply to the last request that finished, written before the reply is
+sent. A header `<status> <nbytes> <started> <finished>`, a newline, then
+`nbytes` of UTF-8 payload. Status and payload are what went on the wire, so a
+cancelled request is an `err` whose payload starts `cancelled by vrc cancel`.
+
+The scripts `expr 1`, `info patchlevel` and `version -short`, which clients
+send as liveness checks, leave both files alone. `vrc wait` relies on that: it
+sends `expr 1`, which queues behind the running script and so returns the
+moment it ends, then reads `<name>.result`. A plugin exiting through `exit`
+deletes both files with the descriptor.
 
 ## Talking to it by hand
 

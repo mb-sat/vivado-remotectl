@@ -1,6 +1,6 @@
 ---
 name: vivado-session
-description: Drive a persistent Vivado session from the shell with `vrc` instead of repeated batch runs. Use for any Vivado work needing more than one run - comparing timing before and after an RTL change, sweeping generics, inspecting a critical path, checking utilization of one IP core, or holding a design open across several queries. Covers the out-of-context synthesis loop and running a baseline and a working tree side by side. NOT for a full project build, which stays batch.
+description: Drive a persistent Vivado session from the shell with `vrc` instead of repeated batch runs. Use for any Vivado work needing more than one run - comparing timing before and after an RTL change, sweeping generics, inspecting a critical path, checking utilization of one IP core, or holding a design open across several queries. Covers the out-of-context synthesis loop and running a baseline and a working tree side by side, and cancelling a running synth_design / place_design / route_design without losing the session. NOT for a full project build, which stays batch.
 ---
 
 # vivado-session
@@ -45,10 +45,11 @@ state persists between calls, which is the point: an open design stays open.
 
 A failing script prints Tcl's `errorInfo` to stderr and exits 1; the session
 survives with its state intact. Exit 3 means no session or an ambiguous one,
-4 a `--timeout` you set, 5 the session died.
+4 a `--timeout` you set, 5 the session died, 6 `vrc cancel` stopped it.
 
-Scripts run inside **Vivado's Tcl 8.5.14**, not 8.6 — no `try`, `lmap`,
-`string cat` or `dict map` in anything you send.
+Vivado 2023.2 and older embed **Tcl 8.5**, 2024.1 onwards 8.6. Unless you know
+the session is a newer one (`vrc info` shows `tcl`), write 8.5: no `try`,
+`lmap`, `string cat` or `dict map` in anything you send.
 
 Keep scratch files in one directory named after the task rather than loose in
 `/tmp`; the examples below use `/tmp/vrc-timing/`.
@@ -80,7 +81,11 @@ back afterwards. With more than one
 session live, name it with `-s` or set `VIVADO_REMOTECTL_SESSION`; guessing is
 an error that lists the candidates.
 
-Each session is its own Vivado holding its own design, so budget ~3 GB each.
+Each session is its own Vivado holding its own design, so budget 4-6 GB each
+once a design is synthesised. `vrc list` shows each one's `RSS` and, on
+stderr, the total and what is still available; `vrc start` refuses below 6 GB
+available (`--min-free GB` to change it), so there is no need to run a
+separate free-memory check first.
 
 ## Synthesise one IP out of context
 
@@ -96,6 +101,7 @@ XDC
 
 cat > /tmp/vrc-timing/ooc.tcl <<'TCL'
 close_design -quiet
+close_project -quiet
 read_verilog [list /path/to/ip/sources/*.v /path/to/ip/build/regs.v]
 read_xdc /tmp/vrc-timing/ooc.xdc
 synth_design -top <top> -part xcvc1902-vsva2197-2MP-e-S -mode out_of_context \
@@ -117,8 +123,12 @@ WNS=0.421 from=g_lane[0].acc_reg/DSP58C<0>_INST/DSP_A_B_DATA58_INST/CLK  to=g_la
 ```
 
 `close_design -quiet` first, then re-read: that is what makes the second
-measurement cheap. `-generic` sweeps build parameters without touching the
-packaging Tcl.
+measurement cheap. `close_project -quiet` too — files read with `read_verilog`
+land in an implicit in-memory project and stay there, so without it a later run
+still holds the earlier one's files, an older definition of the module can win,
+and the only sign is a `CRITICAL WARNING: [Synth 8-9873] overwriting previous
+definition of module` in a log nobody is reading. `-generic` sweeps build
+parameters without touching the packaging Tcl.
 
 ## Sweep a parameter without paying startup again
 
@@ -129,6 +139,7 @@ so `--tail` shows each result as it lands instead of nothing for ten minutes:
 vrc -s work --tail -e '
   foreach lanes {2 4 8 16} {
     close_design -quiet
+    close_project -quiet
     read_verilog [list /path/to/ip/sources/*.v]
     read_xdc /tmp/vrc-timing/ooc.xdc
     synth_design -top <top> -part xcvc1902-vsva2197-2MP-e-S \
@@ -181,7 +192,7 @@ The rows come back verbatim, `| name | used | fixed | prohibited | available | %
 | DSP Slices         |    8 |     0 |          0 |      1968 |  0.41 |
 ```
 
-## Watch or interrupt a long run
+## Watch a long run
 
 Vivado's own progress goes to the session log. `--tail` mirrors it to stderr
 while you wait and stdout stays clean, so `vrc -f ooc.tcl > wns.txt` still
@@ -192,34 +203,89 @@ vrc log work -f          # follow; -n N for the last N lines
 vrc list                 # reads "busy" while a synth_design is running
 ```
 
-Ctrl-C does not stop the script — nothing interrupts `synth_design` once it has
-started. `vrc` says which session is still working and exits 130; reattach with
-`vrc log -f`. A busy session cannot answer anything at all, because Vivado's
-interpreter is single-threaded; requests queue until it is free.
+Ctrl-C only detaches: `vrc` says which session is still working and exits 130,
+and the script keeps running. A busy session cannot answer anything at all,
+because Vivado's interpreter is single-threaded; requests queue until it is
+free.
+
+**Do not write poll loops** over `vrc list` waiting for `idle`. Start a long
+script with `--detach`, which returns once it has started, and collect it with
+`vrc wait`, which blocks until the session is free and prints the result with
+the exit code the original call would have had:
+
+```bash
+vrc -s work --detach -f /tmp/vrc-timing/ooc.tcl
+vrc wait work > /tmp/vrc-timing/wns.txt      # 0 ok, 1 Tcl error, 6 cancelled
+```
+
+The session keeps the reply to its last request on disk, so the same `vrc wait
+work` recovers a result whose client died, timed out or was interrupted. `vrc
+result work` prints it without waiting. `--detach` refuses a busy session.
+
+## Cancel a run that is going nowhere
+
+`vrc cancel` stops the running `synth_design`, `place_design` or
+`route_design` and keeps the session and its open design. On 2023.2 synthesis
+stops within about 7 s, placement and routing within about 2 s. Start the long
+script in the background, since the cancel has to come from another shell:
+
+```bash
+vrc -s work -f ooc.tcl &
+vrc cancel work          # -> "work: cancelled"; the waiting vrc exits 6
+```
+
+After a cancelled `place_design` or `route_design` the design is still open and
+the step can be run again; a cancelled `synth_design` leaves no design.
+
+| `vrc cancel` result | meaning |
+|---|---|
+| exit 0, `cancelled` | the session is idle again |
+| exit 0, `nothing running` | no signal was sent |
+| exit 3, `cannot be cancelled` | a GUI, an attached Vivado, or a session from an older `vrc`; restart it. Do not send it SIGINT by hand, which leaves it unable to answer |
+| exit 4, still busy | the script caught the error in a `catch` and continued |
+| exit 5, Vivado exited | the session crashed; start it again |
+
+Vivado 2023.2 crashed once in thirteen cancelled `route_design` runs, in the
+router. Write a checkpoint before cancelling anything that took long to reach.
+Cancel only sessions you started, by name.
+
+## Do not leave sessions behind
+
+A forgotten session holds 4-6 GB until someone notices. `vrc list` shows how
+long each has been idle in `FOR`. When you start one for a single question, or
+from a subagent that may not get to clean up, give it a limit:
+
+```bash
+vrc start probe --idle-stop 30m --cwd /tmp/vrc-timing
+```
+
+It exits after that long without a request; `vrc list` and `vrc wait` do not
+count, and a running synthesis is never cut off. Stop it yourself when done
+anyway.
 
 ## Stop sessions before a full build
 
-Each session holds ~3 GB, and a project build script that sizes its job count
+Each session holds 4-6 GB, and a project build script that sizes its job count
 from `MemTotal` assumes it owns the host.
 
 ```bash
 vrc stop work            # graceful, then verified
+vrc stop --mine          # every session this Claude session started
 vrc stop --all           # MACHINE-WIDE -- see below
 ```
 
-**`--all` means every session on the machine, not every session you started.**
-On a shared build host there is routinely more than one person or agent
-working, each holding their own Vivado, and `vrc` has no notion of whose is
-whose. Using it to tidy up after yourself will kill someone's synthesis
-mid-run with no warning and no way for them to tell what happened. Stop
-sessions by the names you started them under, and reach for `--all` only when
-`vrc list` shows nothing you do not recognise.
+To tidy up after yourself, use **`--mine`**, not `--all`. Every session records
+who started it — this Claude session as `claude:<id>`, shared with its
+subagents — and `vrc list` shows it in `OWNER`. On a shared host other people
+and agents hold their own Vivados. `--all` leaves a busy session somebody else
+started running, and says so, but it still stops their idle ones, which may
+hold a design they mean to come back to.
 
-The reverse also catches people: **`vrc list` is not a census of Vivados on
-this machine.** Someone driving `vivado -mode batch` directly never registers,
-so an empty list does not mean the host is free — which matters before
-starting a build that sizes itself from `MemTotal`. Use the `ps` line below
-for that.
+The reverse also catches people: someone driving `vivado -mode batch` directly
+never registers as a session. `vrc list` reports such processes on stderr as
+`not a session: pid N`, with their memory, so read that part too before
+starting a build that sizes itself from `MemTotal`. From a sandboxed shell the
+pids are not visible and those lines are missing.
 
 `vrc stop` only signals a process whose recorded `/proc` start time still
 matches, so it cannot hit somebody else's Vivado on a recycled pid; an

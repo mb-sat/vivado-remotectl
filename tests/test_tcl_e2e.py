@@ -1,7 +1,8 @@
-"""End-to-end against the real plugin running on Vivado's tclsh8.5."""
+"""End-to-end against the real plugin on the tclsh8.5 and tclsh8.6 Vivado ships."""
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -30,7 +31,7 @@ def test_descriptor_is_complete_and_private(tcl_session, registry_dir):
     path = registry_dir / "t.session"
     assert info.port > 0
     assert len(info.token) == 32
-    assert info.tcl.startswith("8.5")
+    assert info.tcl.startswith(("8.5", "8.6"))
     assert oct(path.stat().st_mode)[-3:] == "600"
 
 
@@ -288,7 +289,7 @@ def test_name_collision_is_refused(tcl_session, registry_dir, tclsh):
 
     from conftest import tcl_env
 
-    env = tcl_env()
+    env = tcl_env(tclsh)
     env.update(
         {
             "VRC_NAME": "t",  # same name as the running fixture
@@ -313,3 +314,220 @@ def test_name_collision_is_refused(tcl_session, registry_dir, tclsh):
     # the original is untouched
     with Session(tcl_session.info) as client:
         assert client.run("expr 1") == "1"
+
+
+# -- vrc cancel's marker -------------------------------------------------------
+
+
+def _marker(registry_dir):
+    return registry_dir / "t.cancel"
+
+
+def test_cancel_marker_labels_the_error(tcl_session, registry_dir):
+    # What a cancelled synth_design looks like from here: an error with an
+    # empty message, and the marker `vrc cancel` wrote while it ran.
+    marker = _marker(registry_dir)
+    with Session(tcl_session.info) as client:
+        with pytest.raises(RemoteTclError) as exc:
+            client.run(f'close [open {{{marker}}} w]; error ""')
+    assert exc.value.errorinfo.startswith("cancelled by vrc cancel\n")
+    assert not marker.exists()
+
+
+def test_stale_cancel_marker_does_not_label_a_later_error(tcl_session, registry_dir):
+    # The command finished just before the SIGINT: the marker predates the
+    # next request, whose own error must come through unchanged.
+    marker = _marker(registry_dir)
+    marker.touch()
+    old = time.time() - 10
+    os.utime(marker, (old, old))
+    with Session(tcl_session.info) as client:
+        with pytest.raises(RemoteTclError) as exc:
+            client.run('error "boom"')
+    assert exc.value.errorinfo.startswith("boom")
+    assert not marker.exists()
+
+
+def test_cancel_marker_is_cleared_by_a_successful_request(tcl_session, registry_dir):
+    marker = _marker(registry_dir)
+    with Session(tcl_session.info) as client:
+        assert client.run(f'close [open {{{marker}}} w]; expr 1') == "1"
+    assert not marker.exists()
+
+
+# -- the record of what ran ---------------------------------------------------
+
+
+def test_last_result_is_kept_on_disk(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    assert info.results
+    with Session(info) as client:
+        assert client.run("return grüße") == "grüße"
+    last = registry.read_result(info)
+    assert (last.status, last.text) == ("ok", "grüße")
+    assert last.finished >= last.started > 0
+    assert registry.read_running(info) is None
+    assert oct(info.sidecar("result").stat().st_mode)[-3:] == "600"
+
+
+def test_an_error_is_kept_with_its_errorinfo(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    with Session(info) as client:
+        with pytest.raises(RemoteTclError):
+            client.run("error kaboom")
+    last = registry.read_result(info)
+    assert last.status == "err"
+    assert last.text.startswith("kaboom")
+
+
+def test_liveness_checks_leave_the_result_alone(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    with Session(info) as client:
+        client.run("return keep-me")
+        for check in ("expr 1", "info patchlevel"):
+            client.run(check)
+    assert registry.read_result(info).text == "keep-me"
+
+
+def test_running_names_the_script_while_it_runs(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    done = threading.Event()
+
+    def slow():
+        with Session(info) as client:
+            client.run("\n  after 1500 ;# synth_design stand-in\nreturn slow-done")
+        done.set()
+
+    threading.Thread(target=slow).start()
+    deadline = time.monotonic() + 5
+    running = None
+    while running is None and time.monotonic() < deadline:
+        running = registry.read_running(info)
+        time.sleep(0.05)
+    assert running is not None
+    assert running.first_line == "after 1500 ;# synth_design stand-in"
+    assert done.wait(10)
+    assert registry.read_running(info) is None
+    assert registry.read_result(info).text == "slow-done"
+
+
+def test_a_result_survives_its_client(tcl_session):
+    """The agent's shell dies mid-synthesis; the answer must not."""
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    client = Session(info)
+    client.send("after 500; return orphaned")
+    client.close()
+    with Session(info) as waiter:
+        waiter.run("expr 1")  # queues until the orphan has finished
+    assert registry.read_result(info).text == "orphaned"
+
+
+def test_exit_removes_the_record(tcl_session, registry_dir):
+    with Session(tcl_session.info) as client:
+        client.run("return x")
+        assert (registry_dir / "t.result").exists()
+        try:
+            client.run("exit")
+        except Exception:
+            pass
+    tcl_session.proc.wait(timeout=10)
+    assert not (registry_dir / "t.result").exists()
+
+
+# -- --idle-stop -------------------------------------------------------------------
+
+
+@pytest.fixture
+def idle_session(tclsh, registry_dir, tmp_path):
+    """A plugin that exits after 2 s without a request."""
+    import subprocess
+
+    from conftest import PLUGIN, tcl_env, wait_for_session
+
+    env = tcl_env(tclsh)
+    env.update(
+        {
+            "VRC_NAME": "idle",
+            "VRC_PORT": "0",
+            "VRC_DIR": str(registry_dir),
+            "VRC_SERVE": "1",
+            "VRC_AUTOSTART": "1",
+            "VRC_IDLE_STOP": "2",
+        }
+    )
+    with open(tmp_path / "idle.log", "wb") as log, open(os.devnull, "rb") as devnull:
+        proc = subprocess.Popen(
+            [tclsh, str(PLUGIN)], stdin=devnull, stdout=log,
+            stderr=subprocess.STDOUT, env=env, start_new_session=True,
+        )
+    try:
+        yield wait_for_session(registry_dir, "idle"), proc
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_idle_session_exits_and_cleans_up(idle_session, registry_dir):
+    info, proc = idle_session
+    assert info.idle_stop == 2
+    assert proc.wait(timeout=10) == 0
+    assert not (registry_dir / "idle.session").exists()
+
+
+def test_liveness_checks_do_not_keep_it_alive(idle_session):
+    info, proc = idle_session
+    deadline = time.monotonic() + 10
+    with Session(info) as client:
+        while proc.poll() is None and time.monotonic() < deadline:
+            try:
+                client.run("expr 1", timeout=2)
+            except Exception:
+                break
+            time.sleep(0.3)
+    assert proc.wait(timeout=5) == 0
+
+
+def test_a_request_resets_the_clock_and_a_running_one_is_not_cut_off(idle_session):
+    info, proc = idle_session
+    started = time.monotonic()
+    with Session(info) as client:
+        # Re-enters the event loop for longer than the idle limit, the way
+        # wait_on_run does; the timer fires inside and must hold off.
+        assert client.run("after 3500 {set ::d 1}; vwait ::d; return ok") == "ok"
+    assert proc.poll() is None
+    assert proc.wait(timeout=10) == 0
+    assert time.monotonic() - started >= 5
+
+
+def test_a_new_session_does_not_inherit_a_dead_ones_record(tclsh, registry_dir, tmp_path):
+    """Vivado crashed; `vrc start` with the same name must start clean."""
+    import subprocess
+
+    from conftest import PLUGIN, tcl_env, wait_for_session
+
+    (registry_dir / "t.result").write_bytes(b"ok 5 1 2\nstale")
+    (registry_dir / "t.running").write_text("started 1\nsynth_design\n")
+    env = tcl_env(tclsh)
+    env.update({"VRC_NAME": "t", "VRC_DIR": str(registry_dir), "VRC_SERVE": "1"})
+    with open(os.devnull, "rb") as devnull:
+        proc = subprocess.Popen(
+            [tclsh, str(PLUGIN)], stdin=devnull, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=env, start_new_session=True,
+        )
+    try:
+        wait_for_session(registry_dir, "t")
+        assert not (registry_dir / "t.result").exists()
+        assert not (registry_dir / "t.running").exists()
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)

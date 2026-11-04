@@ -20,10 +20,12 @@ import threading
 import time
 from pathlib import Path
 
-from . import registry
+from . import procinfo, registry
 from .client import ConnectFailed, Session
 from .launcher import (
+    CancelError,
     LaunchError,
+    cancel_session,
     log_tail,
     plugin_path,
     start_session,
@@ -38,27 +40,36 @@ EXIT_USAGE = 2
 EXIT_NO_SESSION = 3
 EXIT_TIMEOUT = 4
 EXIT_DIED = 5
+EXIT_CANCELLED = 6
 EXIT_INTERRUPTED = 130
 
-SUBCOMMANDS = ("start", "stop", "list", "log", "repl", "ping", "info", "plugin-path")
+SUBCOMMANDS = (
+    "start", "stop", "cancel", "wait", "result", "list", "log", "repl", "ping",
+    "status", "info", "plugin-path",
+)
 
 USAGE = """\
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail]
+vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 
   Evaluate Tcl in a running Vivado session and print the result.
   -e and -f may both be repeated; they are concatenated in argument order.
-  -f - reads from stdin.
+  -f - reads from stdin. --detach returns once the script has started;
+  collect its result with vrc wait.
 
 Subcommands (must come first):
 
   vrc start [NAME]   launch a Vivado session
-  vrc stop  [NAME]   shut one down (--all for every session)
-  vrc list           what is running
+  vrc stop  [NAME]   shut one down (--mine for yours, --all for every one)
+  vrc cancel [NAME]  cancel the running command, keep the session
+  vrc wait  [NAME]   wait until the session is free, print the last result
+  vrc result [NAME]  print the last result now
+  vrc list           what is running (also: vrc status)
   vrc log   [NAME]   the session's output (-f to follow)
   vrc repl  [NAME]   interactive prompt
   vrc ping  [NAME]   check a session answers
   vrc info  [NAME]   show a session's descriptor
   vrc plugin-path    path to the Tcl plugin, for Vivado_init.tcl
+  vrc --version      the version of vrc itself
 
 Examples:
 
@@ -66,7 +77,7 @@ Examples:
   vrc -e 'version -short'
   vrc -s dut -f ooc.tcl --tail
   vrc -e 'close_design -quiet' -e 'read_verilog {a.v b.v}'
-  vrc list && vrc stop --all
+  vrc list && vrc stop --mine
 """
 
 
@@ -173,6 +184,7 @@ def build_eval_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--tail", action="store_true", default=None)
     p.add_argument("--no-tail", dest="tail", action="store_false")
+    p.add_argument("--detach", action="store_true")
     return p
 
 
@@ -186,12 +198,53 @@ def open_session(session: str | None, port: int | None) -> Session:
     return Session(registry.resolve(session))
 
 
+#: The plugin starts the error text of a request `vrc cancel` stopped with this.
+CANCELLED_PREFIX = "cancelled by vrc cancel"
+
+
+def _still_running_hint(info: registry.SessionInfo) -> str:
+    hint = f"vrc log -f {info.name}"
+    if info.cancel:
+        hint += f"; vrc cancel {info.name} to stop it"
+    return hint
+
+
+#: Options of `vrc start`, which people also try on an eval.
+START_OPTIONS = ("--version", "--vivado", "--cwd", "--gui", "--idle-stop", "--min-free", "--arg")
+
+
+def _explain_leftovers(leftover: list[str]) -> str:
+    """Say what was probably meant by arguments the eval parser did not take."""
+    first = leftover[0]
+    option = first.split("=", 1)[0]
+    if option in START_OPTIONS:
+        hint = f"{option} is an option of 'vrc start', not of evaluating Tcl"
+        if option == "--cwd":
+            hint += "; inside a running session use -e 'cd DIR'"
+        return hint
+    if first.startswith("-"):
+        return f"unknown option {first!r} (see vrc --help)"
+    script = " ".join(leftover)
+    return (
+        f"unexpected argument {first!r}; Tcl goes after -e, quoted as one "
+        f"argument: vrc -e {_shell_quote(script)}"
+    )
+
+
+def _shell_quote(text: str) -> str:
+    import shlex
+
+    return shlex.quote(text)
+
+
 def cmd_eval(argv: list[str]) -> int:
     parser = build_eval_parser()
-    args = parser.parse_args(argv)
+    args, leftover = parser.parse_known_args(argv)
     if args.help:
         print(USAGE, end="")
         return EXIT_OK
+    if leftover:
+        return die(_explain_leftovers(leftover))
 
     parts = getattr(args, "script_parts", None)
     if not parts:
@@ -208,6 +261,11 @@ def cmd_eval(argv: list[str]) -> int:
         client = open_session(args.session, args.port)
     except RegistryError as exc:
         return die(str(exc), EXIT_NO_SESSION)
+
+    if args.detach:
+        if args.port is not None:
+            return die("--detach needs a named session, not --port")
+        return _detach(client.info, script)
 
     tail = args.tail
     if tail is None:
@@ -231,25 +289,23 @@ def cmd_eval(argv: list[str]) -> int:
             result = client.run(script, timeout=timeout)
     except RemoteTclError as exc:
         print(exc.errorinfo, file=sys.stderr)
+        if exc.errorinfo.startswith(CANCELLED_PREFIX):
+            return EXIT_CANCELLED
         return EXIT_TCL_ERROR
     except (socket.timeout, TimeoutError):
         return die(
             f"timed out after {timeout:g}s; the script is still running in "
-            f"session '{client.info.name}' (vrc log -f {client.info.name})",
+            f"session '{client.info.name}' ({_still_running_hint(client.info)})",
             EXIT_TIMEOUT,
         )
     except SessionDied:
-        tail_text = log_tail(client.info.log_path)
-        msg = f"session '{client.info.name}' closed the connection"
-        if tail_text:
-            msg += f"\n--- last lines of {client.info.log_path} ---\n{tail_text}"
-        return die(msg, EXIT_DIED)
+        return _session_died(client.info)
     except ProtocolError as exc:
         return die(f"protocol error: {exc}", EXIT_DIED)
     except KeyboardInterrupt:
         return die(
             f"interrupted; the script keeps running in session "
-            f"'{client.info.name}' (vrc log -f {client.info.name})",
+            f"'{client.info.name}' ({_still_running_hint(client.info)})",
             EXIT_INTERRUPTED,
         )
     except OSError as exc:
@@ -260,6 +316,152 @@ def cmd_eval(argv: list[str]) -> int:
     if result:
         print(result)
     return EXIT_OK
+
+
+# ----------------------------------------------------------------------------
+# results that outlive the client
+# ----------------------------------------------------------------------------
+
+#: How long --detach waits for the plugin to say the script has started.
+DETACH_CONFIRM = 10.0
+
+
+def _detach(info: registry.SessionInfo, script: str) -> int:
+    """Hand a script to an idle session and return once it is running.
+
+    Only an idle session takes one: two queued requests are dispatched in no
+    fixed order, so a `vrc wait` queued behind a detached script could run
+    first and report the result before it.
+    """
+    if not info.results:
+        return die(
+            f"session '{info.name}' was started by an older vrc and keeps no "
+            f"result to collect; restart it, or run without --detach",
+            EXIT_NO_SESSION,
+        )
+    status = registry.probe(info)
+    if status != registry.IDLE:
+        running = registry.read_running(info)
+        what = f": {running.first_line}" if running else ""
+        return die(
+            f"session '{info.name}' is {status}{what}; --detach only hands a "
+            f"script to an idle session (vrc wait {info.name})",
+            EXIT_NO_SESSION,
+        )
+
+    sent = int(time.time())
+    try:
+        with Session(info) as client:
+            client.send(script)
+            deadline = time.monotonic() + DETACH_CONFIRM
+            while time.monotonic() < deadline:
+                running = registry.read_running(info)
+                last = registry.read_result(info)
+                if (running and running.started >= sent) or (
+                    last and last.started >= sent
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                return die(
+                    f"sent to '{info.name}', but it did not report the script "
+                    f"as started within {DETACH_CONFIRM:g}s (vrc log {info.name})",
+                    EXIT_TIMEOUT,
+                )
+    except ConnectFailed as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+    except OSError as exc:
+        return die(str(exc), EXIT_DIED)
+    print(f"{info.name}: running; collect it with vrc wait {info.name}", file=sys.stderr)
+    return EXIT_OK
+
+
+def _print_result(info: registry.SessionInfo) -> int:
+    """Print a session's last result as `vrc -e` would have, same exit code."""
+    last = registry.read_result(info)
+    if last is None:
+        why = "" if info.results else " (started by an older vrc, which keeps none)"
+        return die(f"session '{info.name}' has no recorded result{why}", EXIT_NO_SESSION)
+    if last.status == "ok":
+        if last.text:
+            print(last.text)
+        return EXIT_OK
+    print(last.text, file=sys.stderr)
+    if last.text.startswith(CANCELLED_PREFIX):
+        return EXIT_CANCELLED
+    return EXIT_TCL_ERROR
+
+
+def _session_died(info: registry.SessionInfo, what: str = "closed the connection") -> int:
+    tail_text = log_tail(info.log_path)
+    msg = f"session '{info.name}' {what}"
+    if tail_text:
+        msg += f"\n--- last lines of {info.log_path} ---\n{tail_text}"
+    return die(msg, EXIT_DIED)
+
+
+def cmd_wait(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="vrc wait",
+        description="Wait until the session has finished what it is running, "
+        "then print its last result with that result's exit code.",
+    )
+    p.add_argument("name", nargs="?")
+    p.add_argument("--timeout", type=float, default=None, metavar="SEC",
+                   help="give up after SEC seconds (exit 4); default forever")
+    args = p.parse_args(argv)
+
+    try:
+        info = registry.resolve(args.name)
+    except RegistryError as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    # Requests queue until the interpreter is free, so a liveness check that
+    # comes back is the moment the running script finished. No polling.
+    client = Session(info)
+    try:
+        client.connect()
+        client.run("expr 1", timeout=args.timeout or None)
+    except ConnectFailed as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+    except (socket.timeout, TimeoutError):
+        running = registry.read_running(info)
+        what = f" ({running.first_line})" if running else ""
+        return die(
+            f"'{info.name}' still busy after {args.timeout:g}s{what}",
+            EXIT_TIMEOUT,
+        )
+    except KeyboardInterrupt:
+        return die(f"interrupted; '{info.name}' keeps running", EXIT_INTERRUPTED)
+    except (SessionDied, OSError, ProtocolError):
+        return _session_died(info)
+    finally:
+        client.close()
+    return _print_result(info)
+
+
+def cmd_result(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="vrc result",
+        description="Print the last result the session finished, without waiting.",
+    )
+    p.add_argument("name", nargs="?")
+    args = p.parse_args(argv)
+
+    try:
+        info = registry.resolve(args.name)
+    except RegistryError as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    running = registry.read_running(info)
+    if running is not None and registry.probe(info) == registry.BUSY:
+        print(
+            f"vrc: '{info.name}' has been running {running.first_line!r} for "
+            f"{_fmt_uptime(int(time.time()) - running.started)}; this is the "
+            f"result before it (vrc wait {info.name} for the new one)",
+            file=sys.stderr,
+        )
+    return _print_result(info)
 
 
 # ----------------------------------------------------------------------------
@@ -280,7 +482,21 @@ def cmd_start(argv: list[str]) -> int:
         "--arg", action="append", default=[], metavar="ARG",
         help="extra argument passed through to vivado (repeatable)",
     )
+    p.add_argument(
+        "--idle-stop", type=_duration, default=0, metavar="DUR",
+        help="exit after this long without a request, e.g. 90m or 2h (default never)",
+    )
+    p.add_argument(
+        "--min-free", type=float, default=DEFAULT_MIN_FREE_GB, metavar="GB",
+        help=f"refuse to start with less memory available than this "
+        f"(default {DEFAULT_MIN_FREE_GB:g}; 0 skips the check)",
+    )
     args = p.parse_args(argv)
+
+    if args.min_free > 0:
+        refusal = _memory_refusal(args.name, args.min_free)
+        if refusal:
+            return die(refusal, EXIT_NO_SESSION)
 
     try:
         info = start_session(
@@ -292,6 +508,7 @@ def cmd_start(argv: list[str]) -> int:
             gui=args.gui,
             wait=args.wait,
             extra_args=args.arg,
+            idle_stop=args.idle_stop,
         )
     except (LaunchError, RegistryError) as exc:
         return die(str(exc), EXIT_NO_SESSION)
@@ -301,18 +518,74 @@ def cmd_start(argv: list[str]) -> int:
     return EXIT_OK
 
 
+def _duration(text: str) -> int:
+    """Seconds from ``90``, ``90s``, ``45m`` or ``2h``."""
+    units = {"s": 1, "m": 60, "h": 3600}
+    scale = units.get(text[-1:].lower(), None)
+    number = text[:-1] if scale else text
+    try:
+        value = float(number) * (scale or 1)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a duration: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"negative duration: {text!r}")
+    return int(value)
+
+
+#: A session reaches 4-6 GB once a design is synthesised; with no swap, a
+#: start that leaves less than that free ends with the OOM killer choosing.
+DEFAULT_MIN_FREE_GB = 6.0
+
+
+def _memory_refusal(name: str, min_free_gb: float) -> str | None:
+    free = procinfo.mem_available()
+    if free is None or free >= min_free_gb * 2**30:
+        return None
+    sessions = registry.list_sessions()
+    tree = procinfo.children_map()
+    held = [
+        f"{i.name} {procinfo.fmt_bytes(procinfo.tree_rss(i.pid, tree))}"
+        for i in sessions
+    ]
+    held += [
+        f"pid {s.pid} {procinfo.fmt_bytes(s.rss)} (not a session)"
+        for s in procinfo.stray_vivados([i.pid for i in sessions], tree)
+    ]
+    msg = (
+        f"not starting '{name}': {procinfo.fmt_bytes(free)} available, and a "
+        f"session needs 4-6 GB once a design is loaded"
+    )
+    if held:
+        msg += f"; Vivados holding memory: {', '.join(held)}"
+    return msg + f". Stop one, or pass --min-free 0 to start anyway"
+
+
 def cmd_stop(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc stop")
     p.add_argument("name", nargs="?")
-    p.add_argument("--all", action="store_true")
+    which = p.add_mutually_exclusive_group()
+    which.add_argument(
+        "--mine", action="store_true",
+        help="every session started from this Claude session or by this user",
+    )
+    which.add_argument(
+        "--all", action="store_true",
+        help="every session on the machine, except busy ones somebody else started",
+    )
     p.add_argument("--force", action="store_true", help="skip the graceful exit")
     p.add_argument("--timeout", type=float, default=20.0, metavar="SEC")
     args = p.parse_args(argv)
+    if args.name and (args.all or args.mine):
+        return die("give a session name or --mine/--all, not both")
 
-    if args.all:
+    me = registry.current_owner()
+    skipped = 0
+    if args.all or args.mine:
         targets = registry.list_sessions()
+        if args.mine:
+            targets = [i for i in targets if i.owner == me]
         if not targets:
-            print("no sessions", file=sys.stderr)
+            print("no sessions" + (" of yours" if args.mine else ""), file=sys.stderr)
             return EXIT_OK
     else:
         try:
@@ -321,8 +594,50 @@ def cmd_stop(argv: list[str]) -> int:
             return die(str(exc), EXIT_NO_SESSION)
 
     for info in targets:
+        # --all once killed another agent's synthesis mid-run. A busy session
+        # that is not ours is left alone; naming it still stops it.
+        if args.all and info.owner != me and registry.probe(info) == registry.BUSY:
+            print(
+                f"{info.name}: left running, busy and started by "
+                f"{registry.short_owner(info.owner)}; stop it by name if you must",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
         outcome = stop_session(info, timeout=args.timeout, force=args.force)
         print(f"{info.name}: {outcome}")
+    return EXIT_TCL_ERROR if skipped else EXIT_OK
+
+
+def cmd_cancel(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="vrc cancel")
+    p.add_argument("name", nargs="?")
+    p.add_argument(
+        "--wait", type=float, default=60.0, metavar="SEC",
+        help="how long to wait for the session to come back (default 60)",
+    )
+    args = p.parse_args(argv)
+
+    try:
+        info = registry.resolve(args.name)
+        outcome = cancel_session(info, wait=args.wait)
+    except (RegistryError, CancelError) as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    if outcome == "still-busy":
+        return die(
+            f"{info.name}: SIGINT sent, still busy after {args.wait:g}s; "
+            f"Vivado only checks for it between steps, or the script caught "
+            f"the error and carried on (vrc log -f {info.name})",
+            EXIT_TIMEOUT,
+        )
+    if outcome == "died":
+        tail_text = log_tail(info.log_path)
+        msg = f"{info.name}: Vivado exited while cancelling; vrc start it again"
+        if tail_text:
+            msg += f"\n--- last lines of {info.log_path} ---\n{tail_text}"
+        return die(msg, EXIT_DIED)
+    print(f"{info.name}: {'nothing running' if outcome == 'idle' else outcome}")
     return EXIT_OK
 
 
@@ -343,6 +658,7 @@ def _fmt_uptime(seconds: int) -> str:
 def cmd_list(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc list")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--mine", action="store_true", help="only sessions you started")
     p.add_argument("--prune", action="store_true", help="delete dead descriptors")
     args = p.parse_args(argv)
 
@@ -351,7 +667,18 @@ def cmd_list(argv: list[str]) -> int:
             print(f"pruned {name}", file=sys.stderr)
 
     sessions = registry.list_sessions()
+    if args.mine:
+        me = registry.current_owner()
+        sessions = [i for i in sessions if i.owner == me]
     rows = [(info, registry.probe(info)) for info in sessions]
+    now = int(time.time())
+    since = {}
+    for info, status in rows:
+        changed = registry.last_change(info, status)
+        since[info.name] = max(0, now - changed) if changed else None
+    tree = procinfo.children_map()
+    mem = {info.name: procinfo.tree_rss(info.pid, tree) for info in sessions}
+    strays = procinfo.stray_vivados([info.pid for info in sessions], tree)
 
     if args.json:
         print(
@@ -363,9 +690,12 @@ def cmd_list(argv: list[str]) -> int:
                         "port": i.port,
                         "pid": i.pid,
                         "status": status,
+                        "for": since[i.name],
                         "uptime": i.uptime,
                         "cwd": i.cwd,
                         "tcl": i.tcl,
+                        "rss": mem[i.name],
+                        "owner": i.owner,
                         "log": str(i.log_path),
                     }
                     for i, status in rows
@@ -375,17 +705,45 @@ def cmd_list(argv: list[str]) -> int:
         )
         return EXIT_OK
 
-    if not rows:
-        print(f"no sessions in {registry.state_dir()}", file=sys.stderr)
-        return EXIT_OK
-
-    print(f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<8} {'UPTIME':>8}  CWD")
-    for info, status in rows:
+    if rows:
         print(
-            f"{info.name:<20} {info.port:>6} {info.pid:>8} {status:<8} "
-            f"{_fmt_uptime(info.uptime) if info.started else '-':>8}  {info.cwd}"
+            f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<9} {'FOR':>7} "
+            f"{'UPTIME':>8} {'RSS':>6} {'OWNER':<15}  CWD"
         )
+        for info, status in rows:
+            took = since[info.name]
+            print(
+                f"{info.name:<20} {info.port:>6} {info.pid:>8} {status:<9} "
+                f"{_fmt_uptime(took) if took is not None else '-':>7} "
+                f"{_fmt_uptime(info.uptime) if info.started else '-':>8} "
+                f"{procinfo.fmt_bytes(mem[info.name]):>6} "
+                f"{registry.short_owner(info.owner):<15}  {info.cwd}"
+            )
+    else:
+        print(f"no sessions in {registry.state_dir()}", file=sys.stderr)
+    _print_memory_footer(list(mem.values()), strays)
     return EXIT_OK
+
+
+def _print_memory_footer(
+    session_rss: list[int | None], strays: list[procinfo.Stray]
+) -> None:
+    """Totals and unregistered Vivados, on stderr so the table stays parseable."""
+    sys.stdout.flush()  # so a terminal shows them under the table, not above
+    for stray in strays:
+        print(
+            f"not a session: pid {stray.pid} {procinfo.fmt_bytes(stray.rss)}  "
+            f"vivado {stray.args[:100]}",
+            file=sys.stderr,
+        )
+    held = sum(r or 0 for r in session_rss) + sum(s.rss for s in strays)
+    count = len(session_rss) + len(strays)
+    free = procinfo.mem_available()
+    if count or registry.sandboxed():
+        line = f"{count} Vivado(s) hold {procinfo.fmt_bytes(held)}"
+        if registry.sandboxed():
+            line += " (pids not visible from this sandbox)"
+        print(f"{line}; {procinfo.fmt_bytes(free)} available", file=sys.stderr)
 
 
 def cmd_log(argv: list[str]) -> int:
@@ -472,7 +830,8 @@ def cmd_repl(argv: list[str]) -> int:
                 continue
             except KeyboardInterrupt:
                 print(
-                    "interrupted; the script keeps running in the session",
+                    f"interrupted; the script keeps running in the session "
+                    f"({_still_running_hint(info)})",
                     file=sys.stderr,
                 )
                 break
@@ -534,6 +893,9 @@ def cmd_info(argv: list[str]) -> int:
         "uptime": info.uptime,
         "tcl": info.tcl,
         "cwd": info.cwd,
+        "cancel": info.cancel or "-",
+        "owner": info.owner or "-",
+        "idle_stop": _fmt_uptime(info.idle_stop) if info.idle_stop else "never",
         "log": str(info.log_path),
         "descriptor": str(info.path) if info.path else "",
     }
@@ -555,7 +917,12 @@ def cmd_plugin_path(argv: list[str]) -> int:
 HANDLERS = {
     "start": cmd_start,
     "stop": cmd_stop,
+    "cancel": cmd_cancel,
+    "wait": cmd_wait,
+    "result": cmd_result,
     "list": cmd_list,
+    # What people type first when they want `list`; nothing else claims it.
+    "status": cmd_list,
     "log": cmd_log,
     "repl": cmd_repl,
     "ping": cmd_ping,
@@ -588,6 +955,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv[0] in ("help", "--help", "-h"):
         print(USAGE, end="")
+        return EXIT_OK
+
+    if argv == ["--version"]:
+        from . import __version__
+
+        print(f"vrc {__version__}")
         return EXIT_OK
 
     if not argv[0].startswith("-"):
