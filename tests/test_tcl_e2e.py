@@ -353,3 +353,116 @@ def test_cancel_marker_is_cleared_by_a_successful_request(tcl_session, registry_
     with Session(tcl_session.info) as client:
         assert client.run(f'close [open {{{marker}}} w]; expr 1') == "1"
     assert not marker.exists()
+
+
+# -- the record of what ran ---------------------------------------------------
+
+
+def test_last_result_is_kept_on_disk(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    assert info.results
+    with Session(info) as client:
+        assert client.run("return grüße") == "grüße"
+    last = registry.read_result(info)
+    assert (last.status, last.text) == ("ok", "grüße")
+    assert last.finished >= last.started > 0
+    assert registry.read_running(info) is None
+    assert oct(info.sidecar("result").stat().st_mode)[-3:] == "600"
+
+
+def test_an_error_is_kept_with_its_errorinfo(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    with Session(info) as client:
+        with pytest.raises(RemoteTclError):
+            client.run("error kaboom")
+    last = registry.read_result(info)
+    assert last.status == "err"
+    assert last.text.startswith("kaboom")
+
+
+def test_liveness_checks_leave_the_result_alone(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    with Session(info) as client:
+        client.run("return keep-me")
+        for check in ("expr 1", "info patchlevel"):
+            client.run(check)
+    assert registry.read_result(info).text == "keep-me"
+
+
+def test_running_names_the_script_while_it_runs(tcl_session):
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    done = threading.Event()
+
+    def slow():
+        with Session(info) as client:
+            client.run("\n  after 1500 ;# synth_design stand-in\nreturn slow-done")
+        done.set()
+
+    threading.Thread(target=slow).start()
+    deadline = time.monotonic() + 5
+    running = None
+    while running is None and time.monotonic() < deadline:
+        running = registry.read_running(info)
+        time.sleep(0.05)
+    assert running is not None
+    assert running.first_line == "after 1500 ;# synth_design stand-in"
+    assert done.wait(10)
+    assert registry.read_running(info) is None
+    assert registry.read_result(info).text == "slow-done"
+
+
+def test_a_result_survives_its_client(tcl_session):
+    """The agent's shell dies mid-synthesis; the answer must not."""
+    from vivado_remotectl import registry
+
+    info = registry.find("t")
+    client = Session(info)
+    client.send("after 500; return orphaned")
+    client.close()
+    with Session(info) as waiter:
+        waiter.run("expr 1")  # queues until the orphan has finished
+    assert registry.read_result(info).text == "orphaned"
+
+
+def test_exit_removes_the_record(tcl_session, registry_dir):
+    with Session(tcl_session.info) as client:
+        client.run("return x")
+        assert (registry_dir / "t.result").exists()
+        try:
+            client.run("exit")
+        except Exception:
+            pass
+    tcl_session.proc.wait(timeout=10)
+    assert not (registry_dir / "t.result").exists()
+
+
+def test_a_new_session_does_not_inherit_a_dead_ones_record(tclsh, registry_dir, tmp_path):
+    """Vivado crashed; `vrc start` with the same name must start clean."""
+    import subprocess
+
+    from conftest import PLUGIN, tcl_env, wait_for_session
+
+    (registry_dir / "t.result").write_bytes(b"ok 5 1 2\nstale")
+    (registry_dir / "t.running").write_text("started 1\nsynth_design\n")
+    env = tcl_env(tclsh)
+    env.update({"VRC_NAME": "t", "VRC_DIR": str(registry_dir), "VRC_SERVE": "1"})
+    with open(os.devnull, "rb") as devnull:
+        proc = subprocess.Popen(
+            [tclsh, str(PLUGIN)], stdin=devnull, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=env, start_new_session=True,
+        )
+    try:
+        wait_for_session(registry_dir, "t")
+        assert not (registry_dir / "t.result").exists()
+        assert not (registry_dir / "t.running").exists()
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)

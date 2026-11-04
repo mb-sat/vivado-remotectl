@@ -103,5 +103,17 @@ class Session:
         self.close()
         raise ProtocolError(text or "protocol error")
 
+    def send(self, script: str) -> None:
+        """Send a request and do not wait for its reply.
+
+        The plugin runs a request whose client has gone, and its reply is
+        dropped; ``<name>.result`` keeps it. Closing the connection
+        afterwards is the caller's job.
+        """
+        if self._sock is None:
+            self.connect()
+        assert self._sock is not None
+        self._sock.sendall(encode_request(script, self.info.token))
+
     def ping(self, timeout: float = 2.0) -> str:
         return self.run("info patchlevel", timeout=timeout)

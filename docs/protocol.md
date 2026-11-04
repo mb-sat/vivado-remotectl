@@ -101,6 +101,7 @@ token def737ecb7496f5f78f93e415c5bf371
 tcl 8.5.14
 started 1789698682
 cwd /home/you/rtl
+results 1
 cancel sigint
 ```
 
@@ -124,6 +125,28 @@ stops answering for good. Before the signal, a client creates
 is no older than the request, the plugin puts the `cancelled by vrc cancel`
 line in front of the traceback; it deletes the file after every request either
 way.
+
+## What ran last
+
+`results 1` in the descriptor means the plugin keeps two more files beside it,
+both `0600` and written atomically, so a result outlives the client that asked
+for it:
+
+`<name>.running`
+: exists only while a request executes. `started <epoch seconds>`, then the
+first non-blank line of the script, cut at 200 characters.
+
+`<name>.result`
+: the reply to the last request that finished, written before the reply is
+sent. A header `<status> <nbytes> <started> <finished>`, a newline, then
+`nbytes` of UTF-8 payload. Status and payload are what went on the wire, so a
+cancelled request is an `err` whose payload starts `cancelled by vrc cancel`.
+
+The scripts `expr 1`, `info patchlevel` and `version -short`, which clients
+send as liveness checks, leave both files alone. `vrc wait` relies on that: it
+sends `expr 1`, which queues behind the running script and so returns the
+moment it ends, then reads `<name>.result`. A plugin exiting through `exit`
+deletes both files with the descriptor.
 
 ## Talking to it by hand
 

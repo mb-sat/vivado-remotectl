@@ -19,6 +19,7 @@ from .registry import (
     pid_alive,
     probe,
     proc_starttime,
+    remove_files,
     sandboxed,
     state_dir,
     validate_name,
@@ -303,11 +304,7 @@ def stop_session(
         # rather than risk hitting an unrelated Vivado that reused the pid.
         outcome = "left-running (cannot verify pid)"
 
-    if info.path:
-        try:
-            info.path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    remove_files(info)
     return outcome
 
 

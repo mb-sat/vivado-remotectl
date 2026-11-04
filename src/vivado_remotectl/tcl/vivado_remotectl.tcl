@@ -48,6 +48,12 @@ namespace eval ::vrc {
     variable MAX_HEADER  128
     variable MAX_PAYLOAD [expr {256 * 1024 * 1024}]
     variable VERSION     "V1"
+
+    # Liveness checks the client sends: `vrc list` and `vrc wait` (expr 1),
+    # the readiness poll of `vrc start` (info patchlevel) and `vrc ping`.
+    # They are not recorded as the last result and do not count as activity,
+    # or `vrc list` would overwrite the result it is meant to help recover.
+    variable QUIET [list "expr 1" "info patchlevel" "version -short"]
 }
 
 # ------------------------------------------------------------------------------
@@ -213,6 +219,8 @@ proc ::vrc::_write_session {} {
     puts $f "tcl [info patchlevel]"
     puts $f "started [clock seconds]"
     puts $f "cwd [pwd]"
+    # Tells the client this plugin writes <name>.running and <name>.result.
+    puts $f "results 1"
     if {[::vrc::_env VRC_SERVE 0] eq "prompt"} {
         # Tells `vrc cancel` that a SIGINT here cancels rather than wedges.
         puts $f "cancel sigint"
@@ -226,7 +234,69 @@ proc ::vrc::_rm_session {} {
     variable sessfile
     if {$sessfile ne ""} {
         catch {file delete -force $sessfile}
+        ::vrc::_rm_sidecars
     }
+}
+
+# The per-request files beside the descriptor; see _record_start.
+proc ::vrc::_sidecar {ext} {
+    variable dir
+    variable name
+    return [file join $dir "$name.$ext"]
+}
+
+proc ::vrc::_rm_sidecars {} {
+    foreach ext {running result} {
+        catch {file delete -force [::vrc::_sidecar $ext]}
+    }
+}
+
+# Write a file beside the descriptor atomically, mode 0600. `bytes` is
+# already bytes; the result of a script may be a multi-megabyte report.
+proc ::vrc::_write_sidecar {ext bytes} {
+    set path [::vrc::_sidecar $ext]
+    set tmp "$path.[pid].tmp"
+    if {[catch {
+        set f [open $tmp {WRONLY CREAT TRUNC} 0600]
+        fconfigure $f -translation binary
+        puts -nonewline $f $bytes
+        close $f
+        file rename -force $tmp $path
+    } err]} {
+        catch {close $f}
+        catch {file delete -force $tmp}
+        ::vrc::_log "cannot write $path: $err"
+    }
+}
+
+# ------------------------------------------------------------------------------
+# What a session is doing, kept on disk so it survives the client.
+#
+# A client that dies mid-synthesis -- an agent's shell torn down, a laptop
+# lid closed -- used to take the result with it, and the only way back was to
+# rerun the half hour. Now <name>.running says what is executing and since
+# when, and <name>.result holds the reply to the last request, so `vrc wait`
+# and `vrc result` can hand it over later. Both formats are in
+# docs/protocol.md.
+# ------------------------------------------------------------------------------
+proc ::vrc::_record_start {started script} {
+    set first ""
+    foreach line [split $script "\n"] {
+        set line [string trim $line]
+        if {$line ne ""} { set first $line; break }
+    }
+    if {[string length $first] > 200} {
+        set first "[string range $first 0 196]..."
+    }
+    ::vrc::_write_sidecar running \
+        [encoding convertto utf-8 "started $started\n$first\n"]
+}
+
+proc ::vrc::_record_end {started status text} {
+    set payload [encoding convertto utf-8 $text]
+    ::vrc::_write_sidecar result \
+        "$status [string length $payload] $started [clock seconds]\n$payload"
+    catch {file delete -force [::vrc::_sidecar running]}
 }
 
 # ------------------------------------------------------------------------------
@@ -384,9 +454,12 @@ proc ::vrc::_trim_errorinfo {info} {
 # ------------------------------------------------------------------------------
 proc ::vrc::_exec {chan script} {
     variable busy
+    variable QUIET
 
     set busy 1
     set started [clock seconds]
+    set record [expr {[lsearch -exact $QUIET [string trim $script]] < 0}]
+    if {$record} { ::vrc::_record_start $started $script }
     set rc [catch {uplevel #0 $script} res opts]
     set busy 0
 
@@ -398,16 +471,21 @@ proc ::vrc::_exec {chan script} {
     # rc 2 is TCL_RETURN: a script ending in `return "WNS=..."` is the
     # documented idiom for getting a value out, so it is a success.
     if {$rc == 0 || $rc == 2} {
-        ::vrc::_respond $chan ok $res
+        set status ok
+        set detail $res
     } else {
+        set status err
         set detail $res
         catch {set detail [dict get $opts -errorinfo]}
         set detail [::vrc::_trim_errorinfo $detail]
         if {$cancelled} {
             set detail "cancelled by vrc cancel\n[string trimleft $detail \n]"
         }
-        ::vrc::_respond $chan err $detail
     }
+    # Record before answering, so a client that reads the result file as
+    # soon as its reply arrives never sees the previous one.
+    if {$record} { ::vrc::_record_end $started $status $detail }
+    ::vrc::_respond $chan $status $detail
     after idle ::vrc::_pump
 }
 
@@ -498,6 +576,9 @@ proc ::vrc::start {} {
     if {![::vrc::_claim_session]} {
         return -code error "session '$name' is already live in $dir"
     }
+    # A session of this name that died hard left its last result behind;
+    # this one must not hand that out as its own.
+    ::vrc::_rm_sidecars
     if {[catch {socket -server ::vrc::_accept -myaddr 127.0.0.1 $reqport} s]} {
         ::vrc::_rm_session
         set sessfile ""

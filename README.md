@@ -98,9 +98,29 @@ vrc log dut -f        # follow it
 ```
 
 Ctrl-C detaches `vrc` and leaves the script running: `vrc` reports which
-session is still working and exits 130. Reattach with `vrc log -f`. Passing
-`--timeout` behaves the same way and exits 4. To stop the script itself, use
-`vrc cancel`, described in the next section.
+session is still working and exits 130. Passing `--timeout` behaves the same
+way and exits 4. To stop the script itself, use `vrc cancel`, described in the
+next section.
+
+## Collect a result after the client has gone
+
+The session keeps the reply to its last request on disk, so a result is not
+lost with the shell that asked for it. `vrc wait` blocks until the session is
+free and prints that reply with the exit code `vrc -e` would have given; `vrc
+result` prints it at once, and says so on stderr when a newer script is still
+running.
+
+```sh
+vrc -s dut --detach -f ooc.tcl     # returns once synthesis has started
+...                                # edit, read, do something else
+vrc wait dut > wns.txt             # exits 0, 1 or 6 like the original call
+```
+
+`--detach` only hands a script to an idle session, because two queued scripts
+run in no fixed order and `vrc wait` could otherwise return the earlier one.
+The same works for a client that died, was interrupted or timed out: `vrc wait`
+picks up where it stopped. `vrc wait --timeout SEC` exits 4 if the session is
+still busy and names what it is running.
 
 ## Cancel a synthesis, placement or routing
 
@@ -165,7 +185,7 @@ Exit codes are distinct so a script can branch on them:
 | 0 | fine |
 | 1 | the script raised; `errorInfo` is on stderr |
 | 2 | bad usage |
-| 3 | no session, an ambiguous one, or nothing listening |
+| 3 | no session, an ambiguous one, nothing listening, or no recorded result |
 | 4 | `--timeout` expired; the script is still running |
 | 5 | the session closed the connection |
 | 6 | `vrc cancel` stopped the script |
@@ -262,12 +282,14 @@ the whole loop, and has the rest of the keys and settings.
 ## Commands
 
 ```
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail]
+vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
                                       --cwd DIR --gui --wait SEC --arg ARG
 vrc stop  [NAME]   shut one down      --all --force --timeout SEC
 vrc cancel [NAME]  cancel the command --wait SEC
+vrc wait  [NAME]   wait, last result  --timeout SEC
+vrc result [NAME]  last result now
 vrc list           what is running    --json --prune
 vrc log   [NAME]   session output     -f/--follow -n LINES
 vrc repl  [NAME]   interactive prompt

@@ -44,21 +44,25 @@ EXIT_CANCELLED = 6
 EXIT_INTERRUPTED = 130
 
 SUBCOMMANDS = (
-    "start", "stop", "cancel", "list", "log", "repl", "ping", "info", "plugin-path",
+    "start", "stop", "cancel", "wait", "result", "list", "log", "repl", "ping",
+    "info", "plugin-path",
 )
 
 USAGE = """\
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail]
+vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 
   Evaluate Tcl in a running Vivado session and print the result.
   -e and -f may both be repeated; they are concatenated in argument order.
-  -f - reads from stdin.
+  -f - reads from stdin. --detach returns once the script has started;
+  collect its result with vrc wait.
 
 Subcommands (must come first):
 
   vrc start [NAME]   launch a Vivado session
   vrc stop  [NAME]   shut one down (--all for every session)
   vrc cancel [NAME]  cancel the running command, keep the session
+  vrc wait  [NAME]   wait until the session is free, print the last result
+  vrc result [NAME]  print the last result now
   vrc list           what is running
   vrc log   [NAME]   the session's output (-f to follow)
   vrc repl  [NAME]   interactive prompt
@@ -179,6 +183,7 @@ def build_eval_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--tail", action="store_true", default=None)
     p.add_argument("--no-tail", dest="tail", action="store_false")
+    p.add_argument("--detach", action="store_true")
     return p
 
 
@@ -226,6 +231,11 @@ def cmd_eval(argv: list[str]) -> int:
     except RegistryError as exc:
         return die(str(exc), EXIT_NO_SESSION)
 
+    if args.detach:
+        if args.port is not None:
+            return die("--detach needs a named session, not --port")
+        return _detach(client.info, script)
+
     tail = args.tail
     if tail is None:
         tail = sys.stderr.isatty() and args.port is None
@@ -258,11 +268,7 @@ def cmd_eval(argv: list[str]) -> int:
             EXIT_TIMEOUT,
         )
     except SessionDied:
-        tail_text = log_tail(client.info.log_path)
-        msg = f"session '{client.info.name}' closed the connection"
-        if tail_text:
-            msg += f"\n--- last lines of {client.info.log_path} ---\n{tail_text}"
-        return die(msg, EXIT_DIED)
+        return _session_died(client.info)
     except ProtocolError as exc:
         return die(f"protocol error: {exc}", EXIT_DIED)
     except KeyboardInterrupt:
@@ -279,6 +285,152 @@ def cmd_eval(argv: list[str]) -> int:
     if result:
         print(result)
     return EXIT_OK
+
+
+# ----------------------------------------------------------------------------
+# results that outlive the client
+# ----------------------------------------------------------------------------
+
+#: How long --detach waits for the plugin to say the script has started.
+DETACH_CONFIRM = 10.0
+
+
+def _detach(info: registry.SessionInfo, script: str) -> int:
+    """Hand a script to an idle session and return once it is running.
+
+    Only an idle session takes one: two queued requests are dispatched in no
+    fixed order, so a `vrc wait` queued behind a detached script could run
+    first and report the result before it.
+    """
+    if not info.results:
+        return die(
+            f"session '{info.name}' was started by an older vrc and keeps no "
+            f"result to collect; restart it, or run without --detach",
+            EXIT_NO_SESSION,
+        )
+    status = registry.probe(info)
+    if status != registry.IDLE:
+        running = registry.read_running(info)
+        what = f": {running.first_line}" if running else ""
+        return die(
+            f"session '{info.name}' is {status}{what}; --detach only hands a "
+            f"script to an idle session (vrc wait {info.name})",
+            EXIT_NO_SESSION,
+        )
+
+    sent = int(time.time())
+    try:
+        with Session(info) as client:
+            client.send(script)
+            deadline = time.monotonic() + DETACH_CONFIRM
+            while time.monotonic() < deadline:
+                running = registry.read_running(info)
+                last = registry.read_result(info)
+                if (running and running.started >= sent) or (
+                    last and last.started >= sent
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                return die(
+                    f"sent to '{info.name}', but it did not report the script "
+                    f"as started within {DETACH_CONFIRM:g}s (vrc log {info.name})",
+                    EXIT_TIMEOUT,
+                )
+    except ConnectFailed as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+    except OSError as exc:
+        return die(str(exc), EXIT_DIED)
+    print(f"{info.name}: running; collect it with vrc wait {info.name}", file=sys.stderr)
+    return EXIT_OK
+
+
+def _print_result(info: registry.SessionInfo) -> int:
+    """Print a session's last result as `vrc -e` would have, same exit code."""
+    last = registry.read_result(info)
+    if last is None:
+        why = "" if info.results else " (started by an older vrc, which keeps none)"
+        return die(f"session '{info.name}' has no recorded result{why}", EXIT_NO_SESSION)
+    if last.status == "ok":
+        if last.text:
+            print(last.text)
+        return EXIT_OK
+    print(last.text, file=sys.stderr)
+    if last.text.startswith(CANCELLED_PREFIX):
+        return EXIT_CANCELLED
+    return EXIT_TCL_ERROR
+
+
+def _session_died(info: registry.SessionInfo, what: str = "closed the connection") -> int:
+    tail_text = log_tail(info.log_path)
+    msg = f"session '{info.name}' {what}"
+    if tail_text:
+        msg += f"\n--- last lines of {info.log_path} ---\n{tail_text}"
+    return die(msg, EXIT_DIED)
+
+
+def cmd_wait(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="vrc wait",
+        description="Wait until the session has finished what it is running, "
+        "then print its last result with that result's exit code.",
+    )
+    p.add_argument("name", nargs="?")
+    p.add_argument("--timeout", type=float, default=None, metavar="SEC",
+                   help="give up after SEC seconds (exit 4); default forever")
+    args = p.parse_args(argv)
+
+    try:
+        info = registry.resolve(args.name)
+    except RegistryError as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    # Requests queue until the interpreter is free, so a liveness check that
+    # comes back is the moment the running script finished. No polling.
+    client = Session(info)
+    try:
+        client.connect()
+        client.run("expr 1", timeout=args.timeout or None)
+    except ConnectFailed as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+    except (socket.timeout, TimeoutError):
+        running = registry.read_running(info)
+        what = f" ({running.first_line})" if running else ""
+        return die(
+            f"'{info.name}' still busy after {args.timeout:g}s{what}",
+            EXIT_TIMEOUT,
+        )
+    except KeyboardInterrupt:
+        return die(f"interrupted; '{info.name}' keeps running", EXIT_INTERRUPTED)
+    except (SessionDied, OSError, ProtocolError):
+        return _session_died(info)
+    finally:
+        client.close()
+    return _print_result(info)
+
+
+def cmd_result(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="vrc result",
+        description="Print the last result the session finished, without waiting.",
+    )
+    p.add_argument("name", nargs="?")
+    args = p.parse_args(argv)
+
+    try:
+        info = registry.resolve(args.name)
+    except RegistryError as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    running = registry.read_running(info)
+    if running is not None and registry.probe(info) == registry.BUSY:
+        print(
+            f"vrc: '{info.name}' has been running {running.first_line!r} for "
+            f"{_fmt_uptime(int(time.time()) - running.started)}; this is the "
+            f"result before it (vrc wait {info.name} for the new one)",
+            file=sys.stderr,
+        )
+    return _print_result(info)
 
 
 # ----------------------------------------------------------------------------
@@ -609,6 +761,8 @@ HANDLERS = {
     "start": cmd_start,
     "stop": cmd_stop,
     "cancel": cmd_cancel,
+    "wait": cmd_wait,
+    "result": cmd_result,
     "list": cmd_list,
     "log": cmd_log,
     "repl": cmd_repl,

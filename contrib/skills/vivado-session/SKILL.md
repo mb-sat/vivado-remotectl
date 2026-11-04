@@ -200,9 +200,23 @@ vrc list                 # reads "busy" while a synth_design is running
 ```
 
 Ctrl-C only detaches: `vrc` says which session is still working and exits 130,
-and the script keeps running; reattach with `vrc log -f`. A busy session cannot
-answer anything at all, because Vivado's interpreter is single-threaded;
-requests queue until it is free.
+and the script keeps running. A busy session cannot answer anything at all,
+because Vivado's interpreter is single-threaded; requests queue until it is
+free.
+
+**Do not write poll loops** over `vrc list` waiting for `idle`. Start a long
+script with `--detach`, which returns once it has started, and collect it with
+`vrc wait`, which blocks until the session is free and prints the result with
+the exit code the original call would have had:
+
+```bash
+vrc -s work --detach -f /tmp/vrc-timing/ooc.tcl
+vrc wait work > /tmp/vrc-timing/wns.txt      # 0 ok, 1 Tcl error, 6 cancelled
+```
+
+The session keeps the reply to its last request on disk, so the same `vrc wait
+work` recovers a result whose client died, timed out or was interrupted. `vrc
+result work` prints it without waiting. `--detach` refuses a busy session.
 
 ## Cancel a run that is going nowhere
 

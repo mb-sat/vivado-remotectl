@@ -233,3 +233,71 @@ def test_prune_removes_a_dead_descriptor(live, registry_dir, capsys):
     )
     assert main(["list", "--prune"]) == EXIT_OK
     assert not (registry_dir / "dead.session").exists()
+
+
+# -- results that outlive the client -----------------------------------------
+
+
+def test_result_prints_the_last_one(live, capsys):
+    assert main(["-e", "return first"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["result", "cli"]) == EXIT_OK
+    assert capsys.readouterr().out == "first\n"
+
+
+def test_result_keeps_the_exit_code_of_an_error(live, capsys):
+    assert main(["-e", "error kaboom"]) == EXIT_TCL_ERROR
+    capsys.readouterr()
+    assert main(["result"]) == EXIT_TCL_ERROR
+    assert capsys.readouterr().err.startswith("kaboom")
+
+
+def test_result_before_anything_ran(live, capsys):
+    assert main(["result"]) == EXIT_NO_SESSION
+    assert "no recorded result" in capsys.readouterr().err
+
+
+def test_detach_then_wait(live, capsys):
+    assert main(["-s", "cli", "--detach", "-e", "after 1000; return late"]) == EXIT_OK
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "vrc wait cli" in out.err
+    assert registry.probe(live) == registry.BUSY
+    assert main(["wait", "cli"]) == EXIT_OK
+    assert capsys.readouterr().out == "late\n"
+
+
+def test_detach_refuses_a_busy_session(live, capsys):
+    assert main(["--detach", "-e", "after 2000"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["--detach", "-e", "return second"]) == EXIT_NO_SESSION
+    err = capsys.readouterr().err
+    assert "busy: after 2000" in err
+    assert main(["wait"]) == EXIT_OK
+
+
+def test_wait_times_out_naming_the_script(live, capsys):
+    assert main(["--detach", "-e", "after 3000"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["wait", "--timeout", "0.5"]) == EXIT_TIMEOUT
+    assert "after 3000" in capsys.readouterr().err
+    assert main(["wait"]) == EXIT_OK
+
+
+def test_result_while_busy_says_a_newer_one_is_running(live, capsys):
+    assert main(["-e", "return old"]) == EXIT_OK
+    assert main(["--detach", "-e", "after 2000; return new"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["result"]) == EXIT_OK
+    out = capsys.readouterr()
+    assert out.out == "old\n"
+    assert "vrc wait cli" in out.err
+    assert main(["wait"]) == EXIT_OK
+    assert capsys.readouterr().out == "new\n"
+
+
+def test_wait_on_an_idle_session_returns_at_once(live, capsys):
+    assert main(["-e", "return done"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["wait", "--timeout", "2"]) == EXIT_OK
+    assert capsys.readouterr().out == "done\n"
