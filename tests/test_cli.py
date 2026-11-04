@@ -436,3 +436,41 @@ def test_start_passes_idle_stop_to_the_session(registry_dir, monkeypatch, tclsh,
     finally:
         assert main(["stop", "brief"]) == EXIT_OK
 
+
+# -- the misses people make ------------------------------------------------------
+
+
+def test_status_is_list(live, capsys):
+    assert main(["status"]) == EXIT_OK
+    assert "cli" in capsys.readouterr().out
+
+
+def test_version_of_vrc_itself(capsys):
+    from vivado_remotectl import __version__
+
+    assert main(["--version"]) == EXIT_OK
+    assert capsys.readouterr().out == f"vrc {__version__}\n"
+
+
+def test_a_start_option_on_an_eval_says_so(capsys):
+    assert main(["-s", "x", "--version", "2023.2", "-e", "expr 1"]) == EXIT_USAGE
+    assert "--version is an option of 'vrc start'" in capsys.readouterr().err
+    assert main(["--cwd", "/tmp", "-e", "expr 1"]) == EXIT_USAGE
+    assert "-e 'cd DIR'" in capsys.readouterr().err
+
+
+def test_tcl_without_e_suggests_it(capsys):
+    argv = ["-s", "x", "llength", "[get_cells -hier]"]
+    assert main(argv) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "vrc -e 'llength [get_cells -hier]'" in err
+
+
+def test_an_unknown_option_is_named(capsys):
+    assert main(["-log", "x.log", "-e", "expr 1"]) == EXIT_USAGE
+    assert "unknown option '-log'" in capsys.readouterr().err
+
+
+def test_a_missing_name_lists_the_sessions_there_are(live, capsys):
+    assert main(["-s", "rw", "-e", "expr 1"]) == EXIT_NO_SESSION
+    assert "there are: cli" in capsys.readouterr().err

@@ -383,7 +383,9 @@ def resolve(name: str | None = None, directory: Path | None = None) -> SessionIn
     if name:
         info = find(name, directory)
         if info is None:
-            raise RegistryError(f"no session named {name!r} in {directory}")
+            have = sorted(s.name for s in list_sessions(directory))
+            known = f"; there are: {', '.join(have)}" if have else "; there are none"
+            raise RegistryError(f"no session named {name!r} in {directory}{known}")
         return info
 
     sessions = list_sessions(directory)

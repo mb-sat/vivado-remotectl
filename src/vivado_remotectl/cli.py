@@ -45,7 +45,7 @@ EXIT_INTERRUPTED = 130
 
 SUBCOMMANDS = (
     "start", "stop", "cancel", "wait", "result", "list", "log", "repl", "ping",
-    "info", "plugin-path",
+    "status", "info", "plugin-path",
 )
 
 USAGE = """\
@@ -63,12 +63,13 @@ Subcommands (must come first):
   vrc cancel [NAME]  cancel the running command, keep the session
   vrc wait  [NAME]   wait until the session is free, print the last result
   vrc result [NAME]  print the last result now
-  vrc list           what is running
+  vrc list           what is running (also: vrc status)
   vrc log   [NAME]   the session's output (-f to follow)
   vrc repl  [NAME]   interactive prompt
   vrc ping  [NAME]   check a session answers
   vrc info  [NAME]   show a session's descriptor
   vrc plugin-path    path to the Tcl plugin, for Vivado_init.tcl
+  vrc --version      the version of vrc itself
 
 Examples:
 
@@ -208,12 +209,42 @@ def _still_running_hint(info: registry.SessionInfo) -> str:
     return hint
 
 
+#: Options of `vrc start`, which people also try on an eval.
+START_OPTIONS = ("--version", "--vivado", "--cwd", "--gui", "--idle-stop", "--min-free", "--arg")
+
+
+def _explain_leftovers(leftover: list[str]) -> str:
+    """Say what was probably meant by arguments the eval parser did not take."""
+    first = leftover[0]
+    option = first.split("=", 1)[0]
+    if option in START_OPTIONS:
+        hint = f"{option} is an option of 'vrc start', not of evaluating Tcl"
+        if option == "--cwd":
+            hint += "; inside a running session use -e 'cd DIR'"
+        return hint
+    if first.startswith("-"):
+        return f"unknown option {first!r} (see vrc --help)"
+    script = " ".join(leftover)
+    return (
+        f"unexpected argument {first!r}; Tcl goes after -e, quoted as one "
+        f"argument: vrc -e {_shell_quote(script)}"
+    )
+
+
+def _shell_quote(text: str) -> str:
+    import shlex
+
+    return shlex.quote(text)
+
+
 def cmd_eval(argv: list[str]) -> int:
     parser = build_eval_parser()
-    args = parser.parse_args(argv)
+    args, leftover = parser.parse_known_args(argv)
     if args.help:
         print(USAGE, end="")
         return EXIT_OK
+    if leftover:
+        return die(_explain_leftovers(leftover))
 
     parts = getattr(args, "script_parts", None)
     if not parts:
@@ -890,6 +921,8 @@ HANDLERS = {
     "wait": cmd_wait,
     "result": cmd_result,
     "list": cmd_list,
+    # What people type first when they want `list`; nothing else claims it.
+    "status": cmd_list,
     "log": cmd_log,
     "repl": cmd_repl,
     "ping": cmd_ping,
@@ -922,6 +955,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv[0] in ("help", "--help", "-h"):
         print(USAGE, end="")
+        return EXIT_OK
+
+    if argv == ["--version"]:
+        from . import __version__
+
+        print(f"vrc {__version__}")
         return EXIT_OK
 
     if not argv[0].startswith("-"):

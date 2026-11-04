@@ -325,16 +325,20 @@ vrc stop  [NAME]   shut one down      --mine --all --force --timeout SEC
 vrc cancel [NAME]  cancel the command --wait SEC
 vrc wait  [NAME]   wait, last result  --timeout SEC
 vrc result [NAME]  last result now
-vrc list           what is running    --json --prune --mine
+vrc list           what is running    --json --prune --mine  (alias: status)
 vrc log   [NAME]   session output     -f/--follow -n LINES
 vrc repl  [NAME]   interactive prompt
 vrc ping  [NAME]   check it answers
 vrc info  [NAME]   show the descriptor
 vrc plugin-path    path to the Tcl plugin
+vrc --version      version of vrc
 ```
 
-A subcommand must be the first argument. That is why evaluating Tcl is spelled
-`-e` rather than `vrc run`: `list`, `info` and `log` are all real Tcl commands
+A subcommand must be the first argument. Anything after it that `vrc` does not
+take is an error that says what was probably meant: Tcl given without `-e`
+comes back as the quoted `vrc -e '...'` to run instead, and a `vrc start`
+option on an eval is named as one. Evaluating Tcl is spelled `-e` rather than
+`vrc run` because `list`, `info` and `log` are all real Tcl commands
 as well as subcommands here, and a bare first argument would have to guess.
 
 Under `log`, `-f` means *follow*, as in `tail -f`. At the top level it means
