@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from conftest import FAKE_VIVADO, tcl_env
 
@@ -313,7 +315,7 @@ def test_list_shows_memory_per_session_and_in_total(live, capsys):
     out = capsys.readouterr()
     header, row = out.out.splitlines()[:2]
     assert "RSS" in header
-    assert row.split()[5].endswith(("M", "G"))
+    assert row.split()[6].endswith(("M", "G"))
     assert "1 Vivado(s) hold" in out.err
     assert "available" in out.err
     assert main(["list", "--json"]) == EXIT_OK
@@ -388,3 +390,49 @@ def test_stop_all_takes_somebody_elses_idle_session(foreign, capsys):
     assert main(["stop", "--all"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "cli: stopped" in out and "other: stopped" in out
+
+
+# -- idle time -------------------------------------------------------------------
+
+
+def test_list_shows_how_long_it_has_been_idle_or_busy(live, capsys):
+    import json
+
+    assert main(["-e", "return x"]) == EXIT_OK
+    assert main(["--detach", "-e", "after 2500"]) == EXIT_OK
+    time.sleep(1.2)
+    capsys.readouterr()
+    assert main(["list", "--json"]) == EXIT_OK
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["status"] == "busy" and row["for"] >= 1
+    assert main(["wait"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["list"]) == EXIT_OK
+    header, line = capsys.readouterr().out.splitlines()[:2]
+    assert header.split()[4] == "FOR"
+    status, took = line.split()[3:5]
+    assert status == "idle" and took in ("0s", "1s", "2s")
+
+
+def test_idle_stop_parses_durations():
+    from vivado_remotectl.cli import _duration
+
+    assert [_duration(t) for t in ("90", "90s", "45m", "2h", "1.5h")] == [
+        90, 90, 2700, 7200, 5400,
+    ]
+
+
+def test_start_passes_idle_stop_to_the_session(registry_dir, monkeypatch, tclsh, capsys):
+    for key, value in tcl_env(tclsh).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("VRC_TEST_TCLSH", tclsh)
+    monkeypatch.setenv("VRC_VIVADO", str(FAKE_VIVADO))
+    assert main(["start", "brief", "--idle-stop", "1h", "--min-free", "0"]) == EXIT_OK
+    try:
+        assert registry.find("brief").idle_stop == 3600
+        capsys.readouterr()
+        assert main(["info", "brief"]) == EXIT_OK
+        assert "1h00m" in capsys.readouterr().out
+    finally:
+        assert main(["stop", "brief"]) == EXIT_OK
+

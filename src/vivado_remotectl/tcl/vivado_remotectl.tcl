@@ -26,6 +26,7 @@
 #                  Only this mode can be cancelled, see ::vrc::serve.
 #   VRC_AUTOSTART  0 -> define procs but do not bind
 #   VRC_OWNER      who started the session, recorded in the descriptor
+#   VRC_IDLE_STOP  seconds; exit after this long without a request (0 = never)
 # ==============================================================================
 
 namespace eval ::vrc {
@@ -40,6 +41,8 @@ namespace eval ::vrc {
     if {![info exists sessfile]} { variable sessfile "" }
     if {![info exists forever]}  { variable forever  0  }
     if {![info exists tick]}     { variable tick     0  }
+    if {![info exists active]}   { variable active   [clock seconds] }
+    if {![info exists idle_stop]} { variable idle_stop 0 }
 
     # Per-channel byte accumulator, and the set of channels whose peer has
     # closed its write side but which may still hold a complete request.
@@ -224,6 +227,8 @@ proc ::vrc::_write_session {} {
     # apart on a shared host. Set by `vrc start`; absent when attached.
     set owner [::vrc::_env VRC_OWNER ""]
     if {$owner ne ""} { puts $f "owner $owner" }
+    variable idle_stop
+    if {$idle_stop > 0} { puts $f "idle_stop $idle_stop" }
     # Tells the client this plugin writes <name>.running and <name>.result.
     puts $f "results 1"
     if {[::vrc::_env VRC_SERVE 0] eq "prompt"} {
@@ -467,6 +472,7 @@ proc ::vrc::_exec {chan script} {
     if {$record} { ::vrc::_record_start $started $script }
     set rc [catch {uplevel #0 $script} res opts]
     set busy 0
+    if {$record} { set ::vrc::active [clock seconds] }
 
     # `vrc cancel` drops this marker before its SIGINT. Vivado's own message
     # for a cancelled command is an empty one, so the marker is the only way
@@ -531,6 +537,29 @@ proc ::vrc::serve {} {
 }
 
 # ------------------------------------------------------------------------------
+# Exit once nobody has sent a request for `idle_stop` seconds.
+#
+# Opt-in through `vrc start --idle-stop`, for the session that gets forgotten
+# and holds 5 GB overnight. Liveness checks do not count as use (see QUIET),
+# or a `vrc list` would keep every session alive. The timer also fires when a
+# running script re-enters the event loop, as wait_on_run does; `busy` keeps
+# that from ending a session in the middle of its work.
+# ------------------------------------------------------------------------------
+proc ::vrc::_idle_check {} {
+    variable busy
+    variable active
+    variable idle_stop
+
+    set idle [expr {[clock seconds] - $active}]
+    if {!$busy && $idle >= $idle_stop} {
+        ::vrc::_log "no request for ${idle}s (--idle-stop $idle_stop); exiting"
+        exit 0
+    }
+    set left [expr {$busy ? $idle_stop : $idle_stop - $idle}]
+    after [expr {1000 * ($left < 60 ? $left : 60) + 100}] ::vrc::_idle_check
+}
+
+# ------------------------------------------------------------------------------
 # Send one response frame. Blocking for the duration of the write, which is
 # far simpler to reason about than a background flush of a 50 MB report.
 # Wrapped in catch: a client that hit Ctrl-C gives us EPIPE, and that must
@@ -571,6 +600,7 @@ proc ::vrc::start {} {
     variable token
     variable dir
     variable sessfile
+    variable idle_stop
 
     if {$sock ne ""} { return $port }
 
@@ -592,7 +622,10 @@ proc ::vrc::start {} {
     set sock  $s
     set port  [lindex [fconfigure $sock -sockname] 2]
     set token [::vrc::_token]
+    set idle_stop [::vrc::_env VRC_IDLE_STOP 0]
+    if {![string is integer -strict $idle_stop] || $idle_stop < 0} { set idle_stop 0 }
     ::vrc::_write_session
+    if {$idle_stop > 0} { after 1000 ::vrc::_idle_check }
     ::vrc::_log "session '$name' listening on 127.0.0.1:$port (pid [pid])"
     return $port
 }

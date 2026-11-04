@@ -444,6 +444,71 @@ def test_exit_removes_the_record(tcl_session, registry_dir):
     assert not (registry_dir / "t.result").exists()
 
 
+# -- --idle-stop -------------------------------------------------------------------
+
+
+@pytest.fixture
+def idle_session(tclsh, registry_dir, tmp_path):
+    """A plugin that exits after 2 s without a request."""
+    import subprocess
+
+    from conftest import PLUGIN, tcl_env, wait_for_session
+
+    env = tcl_env(tclsh)
+    env.update(
+        {
+            "VRC_NAME": "idle",
+            "VRC_PORT": "0",
+            "VRC_DIR": str(registry_dir),
+            "VRC_SERVE": "1",
+            "VRC_AUTOSTART": "1",
+            "VRC_IDLE_STOP": "2",
+        }
+    )
+    with open(tmp_path / "idle.log", "wb") as log, open(os.devnull, "rb") as devnull:
+        proc = subprocess.Popen(
+            [tclsh, str(PLUGIN)], stdin=devnull, stdout=log,
+            stderr=subprocess.STDOUT, env=env, start_new_session=True,
+        )
+    try:
+        yield wait_for_session(registry_dir, "idle"), proc
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_idle_session_exits_and_cleans_up(idle_session, registry_dir):
+    info, proc = idle_session
+    assert info.idle_stop == 2
+    assert proc.wait(timeout=10) == 0
+    assert not (registry_dir / "idle.session").exists()
+
+
+def test_liveness_checks_do_not_keep_it_alive(idle_session):
+    info, proc = idle_session
+    deadline = time.monotonic() + 10
+    with Session(info) as client:
+        while proc.poll() is None and time.monotonic() < deadline:
+            try:
+                client.run("expr 1", timeout=2)
+            except Exception:
+                break
+            time.sleep(0.3)
+    assert proc.wait(timeout=5) == 0
+
+
+def test_a_request_resets_the_clock_and_a_running_one_is_not_cut_off(idle_session):
+    info, proc = idle_session
+    started = time.monotonic()
+    with Session(info) as client:
+        # Re-enters the event loop for longer than the idle limit, the way
+        # wait_on_run does; the timer fires inside and must hold off.
+        assert client.run("after 3500 {set ::d 1}; vwait ::d; return ok") == "ok"
+    assert proc.poll() is None
+    assert proc.wait(timeout=10) == 0
+    assert time.monotonic() - started >= 5
+
+
 def test_a_new_session_does_not_inherit_a_dead_ones_record(tclsh, registry_dir, tmp_path):
     """Vivado crashed; `vrc start` with the same name must start clean."""
     import subprocess

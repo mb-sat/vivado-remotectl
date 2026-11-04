@@ -452,6 +452,10 @@ def cmd_start(argv: list[str]) -> int:
         help="extra argument passed through to vivado (repeatable)",
     )
     p.add_argument(
+        "--idle-stop", type=_duration, default=0, metavar="DUR",
+        help="exit after this long without a request, e.g. 90m or 2h (default never)",
+    )
+    p.add_argument(
         "--min-free", type=float, default=DEFAULT_MIN_FREE_GB, metavar="GB",
         help=f"refuse to start with less memory available than this "
         f"(default {DEFAULT_MIN_FREE_GB:g}; 0 skips the check)",
@@ -473,6 +477,7 @@ def cmd_start(argv: list[str]) -> int:
             gui=args.gui,
             wait=args.wait,
             extra_args=args.arg,
+            idle_stop=args.idle_stop,
         )
     except (LaunchError, RegistryError) as exc:
         return die(str(exc), EXIT_NO_SESSION)
@@ -480,6 +485,20 @@ def cmd_start(argv: list[str]) -> int:
     print(f"{info.name}: listening on {info.host}:{info.port} (pid {info.pid})")
     print(f"log: {info.log_path}")
     return EXIT_OK
+
+
+def _duration(text: str) -> int:
+    """Seconds from ``90``, ``90s``, ``45m`` or ``2h``."""
+    units = {"s": 1, "m": 60, "h": 3600}
+    scale = units.get(text[-1:].lower(), None)
+    number = text[:-1] if scale else text
+    try:
+        value = float(number) * (scale or 1)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a duration: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"negative duration: {text!r}")
+    return int(value)
 
 
 #: A session reaches 4-6 GB once a design is synthesised; with no swap, a
@@ -621,6 +640,11 @@ def cmd_list(argv: list[str]) -> int:
         me = registry.current_owner()
         sessions = [i for i in sessions if i.owner == me]
     rows = [(info, registry.probe(info)) for info in sessions]
+    now = int(time.time())
+    since = {}
+    for info, status in rows:
+        changed = registry.last_change(info, status)
+        since[info.name] = max(0, now - changed) if changed else None
     tree = procinfo.children_map()
     mem = {info.name: procinfo.tree_rss(info.pid, tree) for info in sessions}
     strays = procinfo.stray_vivados([info.pid for info in sessions], tree)
@@ -635,6 +659,7 @@ def cmd_list(argv: list[str]) -> int:
                         "port": i.port,
                         "pid": i.pid,
                         "status": status,
+                        "for": since[i.name],
                         "uptime": i.uptime,
                         "cwd": i.cwd,
                         "tcl": i.tcl,
@@ -651,12 +676,14 @@ def cmd_list(argv: list[str]) -> int:
 
     if rows:
         print(
-            f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<9} {'UPTIME':>8} "
-            f"{'RSS':>6} {'OWNER':<15}  CWD"
+            f"{'NAME':<20} {'PORT':>6} {'PID':>8} {'STATUS':<9} {'FOR':>7} "
+            f"{'UPTIME':>8} {'RSS':>6} {'OWNER':<15}  CWD"
         )
         for info, status in rows:
+            took = since[info.name]
             print(
                 f"{info.name:<20} {info.port:>6} {info.pid:>8} {status:<9} "
+                f"{_fmt_uptime(took) if took is not None else '-':>7} "
                 f"{_fmt_uptime(info.uptime) if info.started else '-':>8} "
                 f"{procinfo.fmt_bytes(mem[info.name]):>6} "
                 f"{registry.short_owner(info.owner):<15}  {info.cwd}"
@@ -837,6 +864,7 @@ def cmd_info(argv: list[str]) -> int:
         "cwd": info.cwd,
         "cancel": info.cancel or "-",
         "owner": info.owner or "-",
+        "idle_stop": _fmt_uptime(info.idle_stop) if info.idle_stop else "never",
         "log": str(info.log_path),
         "descriptor": str(info.path) if info.path else "",
     }

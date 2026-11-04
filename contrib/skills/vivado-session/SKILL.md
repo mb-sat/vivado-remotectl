@@ -249,6 +249,20 @@ Vivado 2023.2 crashed once in thirteen cancelled `route_design` runs, in the
 router. Write a checkpoint before cancelling anything that took long to reach.
 Cancel only sessions you started, by name.
 
+## Do not leave sessions behind
+
+A forgotten session holds 4-6 GB until someone notices. `vrc list` shows how
+long each has been idle in `FOR`. When you start one for a single question, or
+from a subagent that may not get to clean up, give it a limit:
+
+```bash
+vrc start probe --idle-stop 30m --cwd /tmp/vrc-timing
+```
+
+It exits after that long without a request; `vrc list` and `vrc wait` do not
+count, and a running synthesis is never cut off. Stop it yourself when done
+anyway.
+
 ## Stop sessions before a full build
 
 Each session holds 4-6 GB, and a project build script that sizes its job count

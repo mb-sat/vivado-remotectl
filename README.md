@@ -59,9 +59,9 @@ starting a second one needs no bookkeeping:
 ```console
 $ vrc start baseline --cwd /tmp/head-checkout
 $ vrc list
-NAME                   PORT      PID STATUS      UPTIME    RSS OWNER            CWD
-baseline              45711  2118440 idle         2m31s   4.6G user:you         /tmp/head-checkout
-dut                   41239  2118203 idle         4m10s   5.2G user:you         /home/you/rtl
+NAME                   PORT      PID STATUS        FOR   UPTIME    RSS OWNER            CWD
+baseline              45711  2118440 idle       1m02s    2m31s   4.6G user:you         /tmp/head-checkout
+dut                   41239  2118203 busy       3m40s    4m10s   5.2G user:you         /home/you/rtl
 2 Vivado(s) hold 9.8G; 18.7G available
 ```
 
@@ -79,6 +79,19 @@ not sessions, such as a `vivado -mode batch` run, which it also lists by pid:
 ```
 not a session: pid 2120411 3.8G  vivado -mode batch -source build.tcl
 ```
+
+`FOR` is how long the session has been in that state: idle since its last
+request finished, or busy since the running script started. A session that is
+easy to forget can be told to go by itself:
+
+```sh
+vrc start scratch --idle-stop 2h    # exits after two hours without a request
+```
+
+Only real requests count; `vrc list`, `vrc ping` and `vrc wait` do not keep it
+alive, and a script that runs longer than the limit is not cut off. `vrc info`
+shows the setting. There is no default, because a session that disappears
+under a design you meant to return to costs more than the memory it held.
 
 `vrc start` refuses when less than 6 GB is available, because with no swap
 the OOM killer otherwise picks which Vivado dies, and lists what is holding the
@@ -306,7 +319,7 @@ the whole loop, and has the rest of the keys and settings.
 vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
-                                      --min-free GB
+                                      --min-free GB --idle-stop DUR
                                       --cwd DIR --gui --wait SEC --arg ARG
 vrc stop  [NAME]   shut one down      --mine --all --force --timeout SEC
 vrc cancel [NAME]  cancel the command --wait SEC

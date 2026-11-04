@@ -122,9 +122,15 @@ def start_session(
     wait: float = 180.0,
     extra_args: list[str] | None = None,
     directory: Path | None = None,
+    idle_stop: int = 0,
 ) -> SessionInfo:
-    """Launch a Vivado with the plugin loaded and wait until it answers."""
+    """Launch a Vivado with the plugin loaded and wait until it answers.
+
+    ``idle_stop`` seconds without a request make the session exit; 0 never.
+    """
     validate_name(name)
+    if idle_stop and gui:
+        raise LaunchError("--idle-stop does not apply to a GUI, which you close yourself")
     if sandboxed():
         raise LaunchError(f"not starting '{name}': {SANDBOX_HINT}")
     directory = directory or state_dir()
@@ -150,6 +156,8 @@ def start_session(
 
     # A GUI Vivado owns its own event loop, so the plugin must not vwait.
     env = child_env(name, port, directory, serve=not gui)
+    if idle_stop > 0:
+        env["VRC_IDLE_STOP"] = str(int(idle_stop))
 
     if not gui:
         # `yes` blocks on the full pipe, so the stream costs nothing, and it

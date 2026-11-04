@@ -103,6 +103,7 @@ started 1789698682
 cwd /home/you/rtl
 results 1
 owner claude:4f0c1a2e-7d1b-4c55-9a3e-1f2b3c4d5e6f
+idle_stop 7200
 cancel sigint
 ```
 
@@ -120,6 +121,10 @@ only writer and leaves nothing to drift.
 `owner` is whoever ran `vrc start`, from `$VRC_OWNER` in the plugin's
 environment; a Vivado attached through `Vivado_init.tcl` has none. Clients use
 it to keep `vrc stop --all` off a busy session someone else started.
+
+`idle_stop` is the number of seconds without a request after which the
+plugin exits by itself, set by `vrc start --idle-stop`; absent means never.
+The liveness checks listed under *What ran last* do not count as requests.
 
 `cancel sigint` is present only in a session running under Vivado's prompt
 loop, which is what `vrc start` sets up without `--gui`. It means a SIGINT to

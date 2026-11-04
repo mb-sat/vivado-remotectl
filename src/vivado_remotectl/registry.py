@@ -81,6 +81,8 @@ class SessionInfo:
     results: bool = False
     #: Who started it, see :func:`current_owner`. Empty when attached.
     owner: str = ""
+    #: Seconds without a request after which the session exits; 0 never.
+    idle_stop: int = 0
     path: Path | None = None
 
     @property
@@ -128,6 +130,7 @@ def read_session_file(path: Path) -> SessionInfo | None:
             cancel=fields.get("cancel", ""),
             results=fields.get("results", "") == "1",
             owner=fields.get("owner", ""),
+            idle_stop=int(fields.get("idle_stop", 0) or 0),
             path=path,
         )
     except (KeyError, ValueError):
@@ -194,6 +197,23 @@ def read_result(info: SessionInfo) -> LastResult | None:
     if len(payload) != nbytes:
         return None
     return LastResult(status, payload.decode("utf-8", errors="replace"), started, finished)
+
+
+def last_change(info: SessionInfo, status: str) -> int | None:
+    """When the session last went idle or busy, as epoch seconds.
+
+    Busy: when the running script started. Idle: when the last request
+    finished, else when the session started. None when it cannot be told.
+    """
+    if status == BUSY:
+        running = read_running(info)
+        return running.started if running else None
+    if status == IDLE:
+        last = read_result(info)
+        if last is not None:
+            return last.finished
+        return info.started or None
+    return None
 
 
 def remove_files(info: SessionInfo) -> None:
