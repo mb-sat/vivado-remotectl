@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -313,3 +314,42 @@ def test_name_collision_is_refused(tcl_session, registry_dir, tclsh):
     # the original is untouched
     with Session(tcl_session.info) as client:
         assert client.run("expr 1") == "1"
+
+
+# -- vrc cancel's marker -------------------------------------------------------
+
+
+def _marker(registry_dir):
+    return registry_dir / "t.cancel"
+
+
+def test_cancel_marker_labels_the_error(tcl_session, registry_dir):
+    # What a cancelled synth_design looks like from here: an error with an
+    # empty message, and the marker `vrc cancel` wrote while it ran.
+    marker = _marker(registry_dir)
+    with Session(tcl_session.info) as client:
+        with pytest.raises(RemoteTclError) as exc:
+            client.run(f'close [open {{{marker}}} w]; error ""')
+    assert exc.value.errorinfo.startswith("cancelled by vrc cancel\n")
+    assert not marker.exists()
+
+
+def test_stale_cancel_marker_does_not_label_a_later_error(tcl_session, registry_dir):
+    # The command finished just before the SIGINT: the marker predates the
+    # next request, whose own error must come through unchanged.
+    marker = _marker(registry_dir)
+    marker.touch()
+    old = time.time() - 10
+    os.utime(marker, (old, old))
+    with Session(tcl_session.info) as client:
+        with pytest.raises(RemoteTclError) as exc:
+            client.run('error "boom"')
+    assert exc.value.errorinfo.startswith("boom")
+    assert not marker.exists()
+
+
+def test_cancel_marker_is_cleared_by_a_successful_request(tcl_session, registry_dir):
+    marker = _marker(registry_dir)
+    with Session(tcl_session.info) as client:
+        assert client.run(f'close [open {{{marker}}} w]; expr 1') == "1"
+    assert not marker.exists()

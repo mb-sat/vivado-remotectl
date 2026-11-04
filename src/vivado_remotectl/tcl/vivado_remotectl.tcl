@@ -20,6 +20,9 @@
 #   VRC_PORT       port to bind, 0 = any     (default 0)
 #   VRC_DIR        session registry dir      (default per XDG, see _state_dir)
 #   VRC_SERVE      1 -> `vwait` at the end; keeps a -mode tcl Vivado alive
+#                  prompt -> define ::vrc::serve and return to Vivado's prompt,
+#                  which `vrc start` feeds an endless `::vrc::serve` stream.
+#                  Only this mode can be cancelled, see ::vrc::serve.
 #   VRC_AUTOSTART  0 -> define procs but do not bind
 # ==============================================================================
 
@@ -34,6 +37,7 @@ namespace eval ::vrc {
     if {![info exists dir]}      { variable dir      "" }
     if {![info exists sessfile]} { variable sessfile "" }
     if {![info exists forever]}  { variable forever  0  }
+    if {![info exists tick]}     { variable tick     0  }
 
     # Per-channel byte accumulator, and the set of channels whose peer has
     # closed its write side but which may still hold a complete request.
@@ -208,6 +212,10 @@ proc ::vrc::_write_session {} {
     puts $f "tcl [info patchlevel]"
     puts $f "started [clock seconds]"
     puts $f "cwd [pwd]"
+    if {[::vrc::_env VRC_SERVE 0] eq "prompt"} {
+        # Tells `vrc cancel` that a SIGINT here cancels rather than wedges.
+        puts $f "cancel sigint"
+    }
     close $f
     catch {file attributes $tmp -permissions 0600}
     file rename -force $tmp $sessfile
@@ -377,8 +385,14 @@ proc ::vrc::_exec {chan script} {
     variable busy
 
     set busy 1
+    set started [clock seconds]
     set rc [catch {uplevel #0 $script} res opts]
     set busy 0
+
+    # `vrc cancel` drops this marker before its SIGINT. Vivado's own message
+    # for a cancelled command is an empty one, so the marker is the only way
+    # to tell the waiting client what happened.
+    set cancelled [::vrc::_take_cancel_marker $started]
 
     # rc 2 is TCL_RETURN: a script ending in `return "WNS=..."` is the
     # documented idiom for getting a value out, so it is a success.
@@ -387,9 +401,49 @@ proc ::vrc::_exec {chan script} {
     } else {
         set detail $res
         catch {set detail [dict get $opts -errorinfo]}
-        ::vrc::_respond $chan err [::vrc::_trim_errorinfo $detail]
+        set detail [::vrc::_trim_errorinfo $detail]
+        if {$cancelled} {
+            set detail "cancelled by vrc cancel\n[string trimleft $detail \n]"
+        }
+        ::vrc::_respond $chan err $detail
     }
     after idle ::vrc::_pump
+}
+
+proc ::vrc::_cancel_marker {} {
+    variable dir
+    variable name
+    return [file join $dir "$name.cancel"]
+}
+
+# Delete the marker and return whether it was written during this request.
+# Called after every request, and the mtime check covers the race where the
+# command finished just before the SIGINT: the marker is then older than the
+# next request and must not label that one's own error.
+proc ::vrc::_take_cancel_marker {started} {
+    set marker [::vrc::_cancel_marker]
+    if {[catch {file mtime $marker} mtime]} { return 0 }
+    catch {file delete -force $marker}
+    return [expr {$mtime >= $started}]
+}
+
+# ------------------------------------------------------------------------------
+# One slice of event loop, then back to Vivado's prompt.
+#
+# This is what makes a session cancellable. Vivado answers SIGINT by
+# cancelling the running synth_design / place_design / route_design, but the
+# interrupt only clears once control is back at its top-level prompt. Under
+# the `vwait` at the bottom of this file it never gets there: the cancelled
+# command's error escapes our `catch`, no response is sent, `busy` stays set
+# and every later callback fails the same way. So `vrc start` pipes
+# `yes ::vrc::serve` into Vivado instead, and the prompt runs this over and
+# over; the socket is only serviced inside it. The slice length only bounds
+# how long an idle SIGINT stays pending, which is harmless either way.
+# ------------------------------------------------------------------------------
+proc ::vrc::serve {} {
+    set id [after 500 {set ::vrc::tick 1}]
+    vwait ::vrc::tick
+    after cancel $id
 }
 
 # ------------------------------------------------------------------------------
@@ -496,16 +550,18 @@ if {[info commands ::vrc::_orig_exit] eq ""} {
 }
 
 if {[string is true -strict [::vrc::_env VRC_AUTOSTART 1]]} {
+    set ::vrc::serve_mode [::vrc::_env VRC_SERVE 0]
     if {[catch {::vrc::start} err]} {
         ::vrc::_log "start failed: $err"
-        if {[string is true -strict [::vrc::_env VRC_SERVE 0]]} {
+        if {[string is true -strict $::vrc::serve_mode] || $::vrc::serve_mode eq "prompt"} {
             exit 1
         }
-    } elseif {[string is true -strict [::vrc::_env VRC_SERVE 0]]} {
-        # Launched by `vrc start`: Vivado's stdin is /dev/null, so without a
-        # vwait here -mode tcl would hit EOF and exit immediately. A GUI or
-        # interactive Vivado must NOT take this branch -- it already owns an
-        # event loop, and blocking here would freeze the UI.
+    } elseif {[string is true -strict $::vrc::serve_mode]} {
+        # Stdin is /dev/null, so without a vwait here -mode tcl would hit EOF
+        # and exit immediately. A GUI or interactive Vivado must NOT take
+        # this branch -- it already owns an event loop, and blocking here
+        # would freeze the UI. In prompt mode we return instead, and
+        # Vivado's prompt keeps calling ::vrc::serve.
         vwait ::vrc::forever
         ::vrc::stop
     }

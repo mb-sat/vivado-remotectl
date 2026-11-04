@@ -97,10 +97,50 @@ vrc log dut           # last 40 lines
 vrc log dut -f        # follow it
 ```
 
-Ctrl-C does not stop the script. Nothing can interrupt `synth_design` once it
-has started, so `vrc` says which session is still working and gets out of the
-way; reattach with `vrc log -f`. Passing `--timeout` behaves the same way and
-exits 4.
+Ctrl-C detaches `vrc` and leaves the script running: `vrc` reports which
+session is still working and exits 130. Reattach with `vrc log -f`. Passing
+`--timeout` behaves the same way and exits 4. To stop the script itself, use
+`vrc cancel`, described in the next section.
+
+## Cancel a synthesis, placement or routing
+
+`vrc cancel` stops the command a session is running and keeps the session and
+whatever design it holds. It sends Vivado the same SIGINT as Ctrl-C at its own
+Tcl prompt, so no run or second Vivado is involved, and the next request is
+served at once:
+
+```console
+$ vrc -s dut -f ooc.tcl &
+$ vrc cancel dut
+dut: cancelled
+```
+
+The waiting client prints `cancelled by vrc cancel` with the Tcl traceback and
+exits 6. Vivado 2023.2 reacted within 7 s in `synth_design` and within 2 s in
+`place_design` and `route_design`. The design that was open stays open; a
+cancelled `place_design` or `route_design` can be run again on it, and a
+cancelled `synth_design` leaves no design behind.
+
+Three cases behave differently:
+
+| situation | what happens |
+|---|---|
+| nothing running | prints `nothing running`; no signal is sent |
+| the script wraps the command in `catch` | the `catch` returns 1 with an empty message and the script continues; `vrc cancel` waits up to `--wait` seconds (default 60) for the session to be free, then exits 4 |
+| Vivado crashes while handling the interrupt | `vrc cancel` prints the log tail and exits 5; start the session again |
+
+The crash was seen once in thirteen cancelled `route_design` runs, as a
+segfault in the router (`HARTFlow::buildRouteDesign`) during route setup. It
+did not recur in twelve attempts at the same point, so it is a race inside
+Vivado. Save a checkpoint before cancelling anything that took long to
+reach.
+
+Only sessions started by `vrc start` without `--gui` can be cancelled; their
+descriptor carries `cancel sigint`, which `vrc info` shows. A GUI session or a
+Vivado attached through `Vivado_init.tcl` is refused, because there a SIGINT
+cancels the command but leaves the plugin unable to answer anything again.
+Sessions started by an older `vrc` are refused for the same reason and need a
+restart.
 
 ## Attach to a Vivado you started yourself
 
@@ -128,6 +168,7 @@ Exit codes are distinct so a script can branch on them:
 | 3 | no session, an ambiguous one, or nothing listening |
 | 4 | `--timeout` expired; the script is still running |
 | 5 | the session closed the connection |
+| 6 | `vrc cancel` stopped the script |
 | 130 | interrupted; the script is still running |
 
 Exit 5 usually means Vivado died, so `vrc` prints the tail of the session log
@@ -205,11 +246,11 @@ stops following until you return to the end, so reading an error mid-run does
 not fight the output. `M-g M-n` walks the errors of the current run only, and
 lands in the RTL.
 
-One thing to know: Vivado runs one script at a time and nothing can interrupt
-`synth_design`. So a second evaluation during a synthesis is refused outright
-rather than queued behind twenty-five minutes of work, and `C-c v k` only
-detaches this end — the script keeps going, which is why a long one should
-`puts` its result as well as `return` it, so the answer survives in the log.
+Vivado runs one script at a time, so a second evaluation during a synthesis is
+refused rather than queued behind twenty-five minutes of work. `C-c v k` only
+detaches this end and the script keeps going, which is why a long one should
+`puts` its result as well as `return` it, so the answer remains in the log. To
+stop the script, run `vrc cancel` from a shell.
 
 Tcl goes to the session through `vrc -f -` rather than through the prompt,
 which is what makes a multi-line `foreach` work: `vrc repl` reads a line at a
@@ -226,6 +267,7 @@ vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail]
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
                                       --cwd DIR --gui --wait SEC --arg ARG
 vrc stop  [NAME]   shut one down      --all --force --timeout SEC
+vrc cancel [NAME]  cancel the command --wait SEC
 vrc list           what is running    --json --prune
 vrc log   [NAME]   session output     -f/--follow -n LINES
 vrc repl  [NAME]   interactive prompt
@@ -274,6 +316,17 @@ the process start time, so `vrc stop` can prove a pid is still the process it
 started before signalling it — pids get recycled, and the alternative is a
 stale descriptor aiming a kill at an unrelated Vivado.
 
+A session started by `vrc start` does not block in a `vwait`. Its stdin is
+`yes ::vrc::serve`, and Vivado's own prompt runs that command over and over;
+each call services the socket for half a second and returns. This is what
+makes `vrc cancel` possible. Vivado clears a SIGINT only when control returns
+to its prompt. Under a `vwait` that never happens: the cancelled command's
+error passes through the plugin's `catch`, no response is sent, and every
+later request fails the same way. The comment on `::vrc::serve` in the plugin
+has the details. Vivado reports a cancelled command as an error with an empty
+message, so `vrc cancel` writes `<name>.cancel` beside the descriptor before
+signalling, and the plugin turns that into the `cancelled by vrc cancel` text.
+
 ## Develop it
 
 ```sh
@@ -296,5 +349,7 @@ vrc start real --version 2023.2
 vrc -e 'version -short'
 vrc -f ooc.tcl --tail       # a genuine OOC synth
 vrc list                    # reads "busy" while it runs
+vrc -f ooc.tcl & sleep 30; vrc cancel real   # client exits 6
+vrc -e 'expr 6*7'           # still answers
 vrc stop real
 ```

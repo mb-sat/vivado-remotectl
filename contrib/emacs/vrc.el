@@ -345,9 +345,9 @@ the job plist."
 
 (defun vrc-detach ()
   "Stop waiting for the session's current job.
-The script keeps running inside Vivado -- nothing can interrupt
-`synth_design' once it has started -- so its result is lost unless the
-script also `puts' it, in which case it is still in the log."
+The script keeps running inside Vivado, so its result is lost unless
+the script also `puts' it, in which case it is still in the log.  To
+stop the script itself, run `vrc cancel' from a shell."
   (interactive)
   (let* ((session (vrc--session))
          (job (vrc--busy-job session)))

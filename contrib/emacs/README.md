@@ -175,11 +175,12 @@ different name does not leave you talking to a ghost.
 In `tcl-mode` buffers, where nothing collides, `C-c C-r`, `C-c C-x` and
 `C-c C-z` work as tcl.el taught your fingers.
 
-Vivado runs one script at a time and nothing can interrupt `synth_design`, so a
-second evaluation during a synthesis is refused outright rather than queued
-behind twenty-five minutes of work. `C-c v k` detaches this end only — the
-script keeps going, which is why a long one should `puts` its result as well as
-`return` it, so the answer survives in the log either way.
+Vivado runs one script at a time, so a second evaluation during a synthesis is
+refused rather than queued behind twenty-five minutes of work. `C-c v k`
+detaches this end only and the script keeps going, which is why a long one
+should `puts` its result as well as `return` it, so the answer remains in the
+log either way. `vrc cancel` from a shell stops the script itself and keeps the
+session.
 
 ## Settings
 

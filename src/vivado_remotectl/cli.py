@@ -23,7 +23,9 @@ from pathlib import Path
 from . import registry
 from .client import ConnectFailed, Session
 from .launcher import (
+    CancelError,
     LaunchError,
+    cancel_session,
     log_tail,
     plugin_path,
     start_session,
@@ -38,9 +40,12 @@ EXIT_USAGE = 2
 EXIT_NO_SESSION = 3
 EXIT_TIMEOUT = 4
 EXIT_DIED = 5
+EXIT_CANCELLED = 6
 EXIT_INTERRUPTED = 130
 
-SUBCOMMANDS = ("start", "stop", "list", "log", "repl", "ping", "info", "plugin-path")
+SUBCOMMANDS = (
+    "start", "stop", "cancel", "list", "log", "repl", "ping", "info", "plugin-path",
+)
 
 USAGE = """\
 vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail]
@@ -53,6 +58,7 @@ Subcommands (must come first):
 
   vrc start [NAME]   launch a Vivado session
   vrc stop  [NAME]   shut one down (--all for every session)
+  vrc cancel [NAME]  cancel the running command, keep the session
   vrc list           what is running
   vrc log   [NAME]   the session's output (-f to follow)
   vrc repl  [NAME]   interactive prompt
@@ -186,6 +192,17 @@ def open_session(session: str | None, port: int | None) -> Session:
     return Session(registry.resolve(session))
 
 
+#: The plugin starts the error text of a request `vrc cancel` stopped with this.
+CANCELLED_PREFIX = "cancelled by vrc cancel"
+
+
+def _still_running_hint(info: registry.SessionInfo) -> str:
+    hint = f"vrc log -f {info.name}"
+    if info.cancel:
+        hint += f"; vrc cancel {info.name} to stop it"
+    return hint
+
+
 def cmd_eval(argv: list[str]) -> int:
     parser = build_eval_parser()
     args = parser.parse_args(argv)
@@ -231,11 +248,13 @@ def cmd_eval(argv: list[str]) -> int:
             result = client.run(script, timeout=timeout)
     except RemoteTclError as exc:
         print(exc.errorinfo, file=sys.stderr)
+        if exc.errorinfo.startswith(CANCELLED_PREFIX):
+            return EXIT_CANCELLED
         return EXIT_TCL_ERROR
     except (socket.timeout, TimeoutError):
         return die(
             f"timed out after {timeout:g}s; the script is still running in "
-            f"session '{client.info.name}' (vrc log -f {client.info.name})",
+            f"session '{client.info.name}' ({_still_running_hint(client.info)})",
             EXIT_TIMEOUT,
         )
     except SessionDied:
@@ -249,7 +268,7 @@ def cmd_eval(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return die(
             f"interrupted; the script keeps running in session "
-            f"'{client.info.name}' (vrc log -f {client.info.name})",
+            f"'{client.info.name}' ({_still_running_hint(client.info)})",
             EXIT_INTERRUPTED,
         )
     except OSError as exc:
@@ -323,6 +342,38 @@ def cmd_stop(argv: list[str]) -> int:
     for info in targets:
         outcome = stop_session(info, timeout=args.timeout, force=args.force)
         print(f"{info.name}: {outcome}")
+    return EXIT_OK
+
+
+def cmd_cancel(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="vrc cancel")
+    p.add_argument("name", nargs="?")
+    p.add_argument(
+        "--wait", type=float, default=60.0, metavar="SEC",
+        help="how long to wait for the session to come back (default 60)",
+    )
+    args = p.parse_args(argv)
+
+    try:
+        info = registry.resolve(args.name)
+        outcome = cancel_session(info, wait=args.wait)
+    except (RegistryError, CancelError) as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    if outcome == "still-busy":
+        return die(
+            f"{info.name}: SIGINT sent, still busy after {args.wait:g}s; "
+            f"Vivado only checks for it between steps, or the script caught "
+            f"the error and carried on (vrc log -f {info.name})",
+            EXIT_TIMEOUT,
+        )
+    if outcome == "died":
+        tail_text = log_tail(info.log_path)
+        msg = f"{info.name}: Vivado exited while cancelling; vrc start it again"
+        if tail_text:
+            msg += f"\n--- last lines of {info.log_path} ---\n{tail_text}"
+        return die(msg, EXIT_DIED)
+    print(f"{info.name}: {'nothing running' if outcome == 'idle' else outcome}")
     return EXIT_OK
 
 
@@ -472,7 +523,8 @@ def cmd_repl(argv: list[str]) -> int:
                 continue
             except KeyboardInterrupt:
                 print(
-                    "interrupted; the script keeps running in the session",
+                    f"interrupted; the script keeps running in the session "
+                    f"({_still_running_hint(info)})",
                     file=sys.stderr,
                 )
                 break
@@ -534,6 +586,7 @@ def cmd_info(argv: list[str]) -> int:
         "uptime": info.uptime,
         "tcl": info.tcl,
         "cwd": info.cwd,
+        "cancel": info.cancel or "-",
         "log": str(info.log_path),
         "descriptor": str(info.path) if info.path else "",
     }
@@ -555,6 +608,7 @@ def cmd_plugin_path(argv: list[str]) -> int:
 HANDLERS = {
     "start": cmd_start,
     "stop": cmd_stop,
+    "cancel": cmd_cancel,
     "list": cmd_list,
     "log": cmd_log,
     "repl": cmd_repl,

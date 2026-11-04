@@ -46,6 +46,16 @@ def tclsh_path() -> str:
     pytest.skip("no tclsh available")
 
 
+@pytest.fixture(autouse=True)
+def _outside_sandbox(monkeypatch):
+    """Run as if unsandboxed, so the suite also passes from a sandboxed shell.
+
+    The fake sessions live in the same sandbox as the test, so they are
+    reachable; only the tests about the sandbox set the variable again.
+    """
+    monkeypatch.delenv("SANDBOX_RUNTIME", raising=False)
+
+
 @pytest.fixture(scope="session")
 def tclsh() -> str:
     return tclsh_path()

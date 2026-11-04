@@ -7,6 +7,7 @@ from conftest import FAKE_VIVADO, tcl_env
 
 from vivado_remotectl import launcher, registry
 from vivado_remotectl.cli import (
+    EXIT_CANCELLED,
     EXIT_DIED,
     EXIT_NO_SESSION,
     EXIT_OK,
@@ -149,6 +150,19 @@ def test_timeout_exits_four_and_says_where_it_is_still_running(live, capsys):
     err = capsys.readouterr().err
     assert "timed out" in err
     assert "vrc log -f cli" in err
+    assert "vrc cancel cli" in err
+
+
+def test_a_cancelled_request_exits_six(live, registry_dir, capsys):
+    marker = registry_dir / "cli.cancel"
+    script = f'close [open {{{marker}}} w]; error ""'
+    assert main(["-e", script, "--no-tail"]) == EXIT_CANCELLED
+    assert capsys.readouterr().err.startswith("cancelled by vrc cancel")
+
+
+def test_cancel_with_nothing_running(live, capsys):
+    assert main(["cancel", "cli"]) == EXIT_OK
+    assert capsys.readouterr().out == "cli: nothing running\n"
 
 
 def test_explicit_port_bypasses_the_registry(live, capsys):

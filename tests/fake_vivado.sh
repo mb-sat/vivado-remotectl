@@ -15,8 +15,11 @@ if [ -z "$plugin" ]; then
     echo "fake_vivado: no -source given" >&2
     exit 64
 fi
-# A `version -short` from the CLI should look like Vivado.
-exec "$VRC_TEST_TCLSH" <<TCL
-proc version {args} { return "2023.2.2 (fake)" }
-source $plugin
-TCL
+# A `version -short` from the CLI should look like Vivado. The preamble is
+# followed by our own stdin, so tclsh goes on to read the `::vrc::serve`
+# stream `vrc start` pipes in, as Vivado's prompt does.
+{
+    printf 'proc version {args} { return "2023.2.2 (fake)" }\n'
+    printf 'source %s\n' "$plugin"
+    cat
+} | exec "$VRC_TEST_TCLSH"

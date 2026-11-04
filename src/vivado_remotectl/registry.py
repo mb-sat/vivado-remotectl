@@ -21,6 +21,16 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 IDLE = "idle"
 BUSY = "busy"
 DEAD = "dead"
+#: Not dead, just out of reach: see :func:`sandboxed`.
+SANDBOXED = "sandboxed"
+
+#: Appended to errors raised from inside a sandbox.
+SANDBOX_HINT = (
+    "this shell is sandboxed (SANDBOX_RUNTIME is set): it has its own loopback "
+    "and pid namespace, so no session is reachable from here. Run vrc as a "
+    "bare command, without cd &&, pipes, env prefixes or loops, so the "
+    "sandbox's excludedCommands entry applies"
+)
 
 
 class RegistryError(Exception):
@@ -64,6 +74,9 @@ class SessionInfo:
     #: /proc start time of the session process, used to prove a pid has not
     #: been recycled before we signal it. Empty for older descriptors.
     starttime: str = ""
+    #: How a running command can be cancelled: "sigint" for sessions that
+    #: `vrc start` put under Vivado's prompt loop, empty when it cannot be.
+    cancel: str = ""
     path: Path | None = None
 
     @property
@@ -103,6 +116,7 @@ def read_session_file(path: Path) -> SessionInfo | None:
             cwd=fields.get("cwd", ""),
             tcl=fields.get("tcl", ""),
             starttime=fields.get("starttime", ""),
+            cancel=fields.get("cancel", ""),
             path=path,
         )
     except (KeyError, ValueError):
@@ -123,6 +137,17 @@ def list_sessions(directory: Path | None = None) -> list[SessionInfo]:
         if info is not None:
             out.append(info)
     return out
+
+
+def sandboxed() -> bool:
+    """Are we inside the Claude Code sandbox?
+
+    It runs commands under bwrap with ``--unshare-net``, so 127.0.0.1 is a
+    private loopback and every session refuses the connection. Telling that
+    apart from a dead session keeps ``prune`` from deleting live descriptors
+    and stops callers from starting a second Vivado beside the first.
+    """
+    return bool(os.environ.get("SANDBOX_RUNTIME"))
 
 
 def pid_alive(pid: int) -> bool:
@@ -194,7 +219,7 @@ def probe(info: SessionInfo, timeout: float = 0.5) -> str:
     try:
         sock = socket.create_connection((info.host, info.port), timeout=timeout)
     except OSError:
-        return DEAD
+        return SANDBOXED if sandboxed() else DEAD
     try:
         sock.sendall(encode_request("expr 1", info.token))
         read_response(FrameReader(sock))

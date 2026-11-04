@@ -1,6 +1,6 @@
 ---
 name: vivado-session
-description: Drive a persistent Vivado session from the shell with `vrc` instead of repeated batch runs. Use for any Vivado work needing more than one run - comparing timing before and after an RTL change, sweeping generics, inspecting a critical path, checking utilization of one IP core, or holding a design open across several queries. Covers the out-of-context synthesis loop and running a baseline and a working tree side by side. NOT for a full project build, which stays batch.
+description: Drive a persistent Vivado session from the shell with `vrc` instead of repeated batch runs. Use for any Vivado work needing more than one run - comparing timing before and after an RTL change, sweeping generics, inspecting a critical path, checking utilization of one IP core, or holding a design open across several queries. Covers the out-of-context synthesis loop and running a baseline and a working tree side by side, and cancelling a running synth_design / place_design / route_design without losing the session. NOT for a full project build, which stays batch.
 ---
 
 # vivado-session
@@ -45,7 +45,7 @@ state persists between calls, which is the point: an open design stays open.
 
 A failing script prints Tcl's `errorInfo` to stderr and exits 1; the session
 survives with its state intact. Exit 3 means no session or an ambiguous one,
-4 a `--timeout` you set, 5 the session died.
+4 a `--timeout` you set, 5 the session died, 6 `vrc cancel` stopped it.
 
 Scripts run inside **Vivado's Tcl 8.5.14**, not 8.6 — no `try`, `lmap`,
 `string cat` or `dict map` in anything you send.
@@ -187,7 +187,7 @@ The rows come back verbatim, `| name | used | fixed | prohibited | available | %
 | DSP Slices         |    8 |     0 |          0 |      1968 |  0.41 |
 ```
 
-## Watch or interrupt a long run
+## Watch a long run
 
 Vivado's own progress goes to the session log. `--tail` mirrors it to stderr
 while you wait and stdout stays clean, so `vrc -f ooc.tcl > wns.txt` still
@@ -198,10 +198,37 @@ vrc log work -f          # follow; -n N for the last N lines
 vrc list                 # reads "busy" while a synth_design is running
 ```
 
-Ctrl-C does not stop the script — nothing interrupts `synth_design` once it has
-started. `vrc` says which session is still working and exits 130; reattach with
-`vrc log -f`. A busy session cannot answer anything at all, because Vivado's
-interpreter is single-threaded; requests queue until it is free.
+Ctrl-C only detaches: `vrc` says which session is still working and exits 130,
+and the script keeps running; reattach with `vrc log -f`. A busy session cannot
+answer anything at all, because Vivado's interpreter is single-threaded;
+requests queue until it is free.
+
+## Cancel a run that is going nowhere
+
+`vrc cancel` stops the running `synth_design`, `place_design` or
+`route_design` and keeps the session and its open design. On 2023.2 synthesis
+stops within about 7 s, placement and routing within about 2 s. Start the long
+script in the background, since the cancel has to come from another shell:
+
+```bash
+vrc -s work -f ooc.tcl &
+vrc cancel work          # -> "work: cancelled"; the waiting vrc exits 6
+```
+
+After a cancelled `place_design` or `route_design` the design is still open and
+the step can be run again; a cancelled `synth_design` leaves no design.
+
+| `vrc cancel` result | meaning |
+|---|---|
+| exit 0, `cancelled` | the session is idle again |
+| exit 0, `nothing running` | no signal was sent |
+| exit 3, `cannot be cancelled` | a GUI, an attached Vivado, or a session from an older `vrc`; restart it. Do not send it SIGINT by hand, which leaves it unable to answer |
+| exit 4, still busy | the script caught the error in a `catch` and continued |
+| exit 5, Vivado exited | the session crashed; start it again |
+
+Vivado 2023.2 crashed once in thirteen cancelled `route_design` runs, in the
+router. Write a checkpoint before cancelling anything that took long to reach.
+Cancel only sessions you started, by name.
 
 ## Stop sessions before a full build
 

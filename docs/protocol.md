@@ -35,7 +35,8 @@ land here, because a script ending in `return "WNS=..."` is a success.
 `err`
 : the script raised; the payload is `$::errorInfo`, whose first line is the
 message and the rest the Tcl traceback. The session is unharmed and keeps its
-state.
+state. A request stopped by `vrc cancel` is an `err` whose first line is
+`cancelled by vrc cancel`.
 
 `proto`
 : the frame was malformed or the token was wrong. The server closes the
@@ -86,7 +87,8 @@ running Vivado, which includes `exec`.
 
 `<state-dir>/<name>.session`, mode `0600`, written atomically by the plugin
 and read by everyone else. Flat `key value` lines, one per line — the format
-is this plain so that the Tcl side, which is the only writer, needs no encoder:
+is this plain so that the Tcl side, which is the only writer, needs no encoder,
+and readers ignore keys they do not know:
 
 ```
 v 1
@@ -99,6 +101,7 @@ token def737ecb7496f5f78f93e415c5bf371
 tcl 8.5.14
 started 1789698682
 cwd /home/you/rtl
+cancel sigint
 ```
 
 `port` is the port actually bound, which matters because the default request
@@ -111,6 +114,16 @@ The name is claimed with an `O_EXCL` create, so two simultaneous `vrc start`s
 for the same name cannot both win. The log path is not stored — it is
 `<name>.log` beside the descriptor, by convention, which keeps the plugin the
 only writer and leaves nothing to drift.
+
+`cancel sigint` is present only in a session running under Vivado's prompt
+loop, which is what `vrc start` sets up without `--gui`. It means a SIGINT to
+`pid` cancels the running command and the session stays usable. A client must
+not send SIGINT to a session without it: in a `vwait` or a GUI the session
+stops answering for good. Before the signal, a client creates
+`<state-dir>/<name>.cancel`. When the request ends with an error and the file
+is no older than the request, the plugin puts the `cancelled by vrc cancel`
+line in front of the traceback; it deletes the file after every request either
+way.
 
 ## Talking to it by hand
 

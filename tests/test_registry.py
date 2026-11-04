@@ -77,10 +77,22 @@ def test_pid_alive():
     assert not registry.pid_alive(2**22)
 
 
-def test_probe_reports_dead_when_nothing_listens(registry_dir):
+def test_probe_reports_dead_when_nothing_listens(registry_dir, monkeypatch):
+    monkeypatch.delenv("SANDBOX_RUNTIME", raising=False)
     write_descriptor(registry_dir, "gone", port=1, pid=2**22)
     info = registry.read_session_file(registry_dir / "gone.session")
     assert registry.probe(info, timeout=0.2) == registry.DEAD
+
+
+def test_probe_inside_the_sandbox_is_not_dead(registry_dir, monkeypatch):
+    # A refused connect there says nothing about the session, so prune must
+    # leave the descriptor alone.
+    monkeypatch.setenv("SANDBOX_RUNTIME", "1")
+    write_descriptor(registry_dir, "far", port=1, pid=2**22)
+    info = registry.read_session_file(registry_dir / "far.session")
+    assert registry.probe(info, timeout=0.2) == registry.SANDBOXED
+    assert registry.prune(registry_dir) == []
+    assert (registry_dir / "far.session").exists()
 
 
 def test_probe_reports_idle_for_a_live_session(tcl_session):
