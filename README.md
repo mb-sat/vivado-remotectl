@@ -23,6 +23,9 @@ There is one thing to send — Tcl — and it comes back as the string Vivado
 produced. No typed wrappers, so nothing sits between you and a command that
 already works at the Vivado prompt.
 
+To build a block design's out-of-context IP runs in a few persistent sessions
+instead of one Vivado per run, see [README-batchbuild.md](README-batchbuild.md).
+
 ## Run some Tcl in a session
 
 `-e` takes a script, `-f` takes a file, and `-f -` reads standard input. Both
