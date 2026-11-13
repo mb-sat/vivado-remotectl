@@ -25,9 +25,11 @@ from .client import ConnectFailed, Session
 from .launcher import (
     CancelError,
     LaunchError,
+    RestartError,
     cancel_session,
     log_tail,
     plugin_path,
+    restart_session,
     start_session,
     stop_session,
 )
@@ -44,7 +46,7 @@ EXIT_CANCELLED = 6
 EXIT_INTERRUPTED = 130
 
 SUBCOMMANDS = (
-    "start", "stop", "cancel", "wait", "result", "list", "log", "repl", "ping",
+    "start", "stop", "restart", "cancel", "wait", "result", "list", "log", "repl", "ping",
     "status", "info", "plugin-path",
 )
 
@@ -60,6 +62,7 @@ Subcommands (must come first):
 
   vrc start [NAME]   launch a Vivado session
   vrc stop  [NAME]   shut one down (--mine for yours, --all for every one)
+  vrc restart [NAME] stop it, running or not, and start it again as before
   vrc cancel [NAME]  cancel the running command, keep the session
   vrc wait  [NAME]   wait until the session is free, print the last result
   vrc result [NAME]  print the last result now
@@ -609,6 +612,42 @@ def cmd_stop(argv: list[str]) -> int:
     return EXIT_TCL_ERROR if skipped else EXIT_OK
 
 
+def cmd_restart(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="vrc restart",
+        description="Stop a session, killing whatever it is running, and start "
+        "it again with the Vivado, directory and options `vrc start` gave it.",
+    )
+    p.add_argument("name", nargs="?")
+    p.add_argument(
+        "--wait", type=float, default=None, metavar="SEC",
+        help="how long to wait for the new session (default: as at its start)",
+    )
+    p.add_argument(
+        "--min-free", type=float, default=DEFAULT_MIN_FREE_GB, metavar="GB",
+        help=f"do not start it again with less memory available than this, "
+        f"counted after the old one has exited (default {DEFAULT_MIN_FREE_GB:g}; "
+        f"0 skips the check)",
+    )
+    args = p.parse_args(argv)
+
+    def check_memory() -> None:
+        if args.min_free > 0:
+            refusal = _memory_refusal(info.name, args.min_free)
+            if refusal:
+                raise RestartError(refusal)
+
+    try:
+        info = registry.resolve(args.name)
+        new, was = restart_session(info, wait=args.wait, before_start=check_memory)
+    except (RegistryError, RestartError) as exc:
+        return die(str(exc), EXIT_NO_SESSION)
+
+    note = {"busy": ", its running command killed", "dead": ", it had died"}.get(was, "")
+    print(f"{new.name}: restarted{note}; listening on {new.host}:{new.port} (pid {new.pid})")
+    return EXIT_OK
+
+
 def cmd_cancel(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc cancel")
     p.add_argument("name", nargs="?")
@@ -917,6 +956,7 @@ def cmd_plugin_path(argv: list[str]) -> int:
 HANDLERS = {
     "start": cmd_start,
     "stop": cmd_stop,
+    "restart": cmd_restart,
     "cancel": cmd_cancel,
     "wait": cmd_wait,
     "result": cmd_result,

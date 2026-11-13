@@ -474,3 +474,22 @@ def test_an_unknown_option_is_named(capsys):
 def test_a_missing_name_lists_the_sessions_there_are(live, capsys):
     assert main(["-s", "rw", "-e", "expr 1"]) == EXIT_NO_SESSION
     assert "there are: cli" in capsys.readouterr().err
+
+
+def test_restart_prints_the_new_session(live, capsys):
+    assert main(["restart", "cli", "--min-free", "0"]) == EXIT_OK
+    out = capsys.readouterr().out
+    new = registry.resolve("cli")
+    assert new.pid != live.pid
+    assert out.startswith(f"cli: restarted; listening on 127.0.0.1:{new.port} (pid {new.pid})")
+    launcher.stop_session(new, force=True)
+
+
+def test_restart_refuses_to_start_short_of_memory(live, capsys, monkeypatch):
+    from vivado_remotectl import procinfo
+
+    monkeypatch.setattr(procinfo, "mem_available", lambda: 2**30)
+    assert main(["restart", "cli", "--min-free", "6"]) == EXIT_NO_SESSION
+    err = capsys.readouterr().err
+    assert "stopped, but not started again: not starting 'cli'" in err
+    assert "start it with: vrc start cli --vivado " in err

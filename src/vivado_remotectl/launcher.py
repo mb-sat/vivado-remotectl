@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import glob
+import json
 import os
+import shlex
 import signal
 import subprocess
 import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .client import ConnectFailed, Session
@@ -92,14 +95,16 @@ def find_vivado(path: str | None = None, version: str | None = None) -> str:
 SERVE_LINE = "::vrc::serve"
 
 
-def child_env(name: str, port: int, directory: Path, serve: bool = True) -> dict[str, str]:
+def child_env(
+    name: str, port: int, directory: Path, serve: bool = True, owner: str | None = None
+) -> dict[str, str]:
     env = dict(os.environ)
     env["VRC_NAME"] = name
     env["VRC_PORT"] = str(port)
     env["VRC_DIR"] = str(directory)
     env["VRC_SERVE"] = "prompt" if serve else "0"
     env["VRC_AUTOSTART"] = "1"
-    env["VRC_OWNER"] = current_owner()
+    env["VRC_OWNER"] = owner if owner is not None else current_owner()
     return env
 
 
@@ -109,6 +114,45 @@ def log_tail(path: Path, lines: int = 20) -> str:
     except OSError:
         return ""
     return "\n".join(content.splitlines()[-lines:])
+
+
+@dataclass
+class LaunchRecord:
+    """How `vrc start` launched a session, so `vrc restart` can repeat it.
+
+    Kept in ``<name>.launch`` beside the descriptor. The plugin writes the
+    descriptor and knows nothing of this: an attached Vivado, or a session
+    from an older `vrc`, has no record and cannot be restarted.
+    """
+
+    vivado: str
+    cwd: str
+    port: int = 0
+    gui: bool = False
+    extra_args: list[str] = field(default_factory=list)
+    idle_stop: int = 0
+    wait: float = 180.0
+
+
+def launch_record_path(directory: Path, name: str) -> Path:
+    return directory / f"{name}.launch"
+
+
+def write_launch_record(directory: Path, name: str, record: LaunchRecord) -> None:
+    path = launch_record_path(directory, name)
+    tmp = path.with_suffix(".launch.tmp")
+    tmp.write_text(json.dumps(asdict(record), indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_launch_record(info: SessionInfo) -> LaunchRecord | None:
+    """The record for this session, or None if it has none or it is unreadable."""
+    path = info.sidecar("launch")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return LaunchRecord(**data)
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def start_session(
@@ -123,10 +167,13 @@ def start_session(
     extra_args: list[str] | None = None,
     directory: Path | None = None,
     idle_stop: int = 0,
+    owner: str | None = None,
 ) -> SessionInfo:
     """Launch a Vivado with the plugin loaded and wait until it answers.
 
     ``idle_stop`` seconds without a request make the session exit; 0 never.
+    ``owner`` overrides who the session is recorded as started by; a restart
+    keeps the original owner.
     """
     validate_name(name)
     if idle_stop and gui:
@@ -155,7 +202,7 @@ def start_session(
     argv += extra_args or []
 
     # A GUI Vivado owns its own event loop, so the plugin must not vwait.
-    env = child_env(name, port, directory, serve=not gui)
+    env = child_env(name, port, directory, serve=not gui, owner=owner)
     if idle_stop > 0:
         env["VRC_IDLE_STOP"] = str(int(idle_stop))
 
@@ -164,6 +211,16 @@ def start_session(
         # dies of SIGPIPE when Vivado exits. Both sit in the one process
         # group that start_new_session gives the shell.
         argv = ["sh", "-c", f'yes {SERVE_LINE} | exec "$@"', "sh", *argv]
+
+    workdir = os.path.abspath(cwd or os.getcwd())
+    write_launch_record(
+        directory,
+        name,
+        LaunchRecord(
+            vivado=exe, cwd=workdir, port=port, gui=gui,
+            extra_args=list(extra_args or []), idle_stop=idle_stop, wait=wait,
+        ),
+    )
 
     with open(log_path, "ab") as log, open(os.devnull, "rb") as devnull:
         log.write(
@@ -176,7 +233,7 @@ def start_session(
             stdin=devnull,
             stdout=log,
             stderr=subprocess.STDOUT,
-            cwd=cwd or os.getcwd(),
+            cwd=workdir,
             env=env,
             start_new_session=True,  # own process group, so we can killpg later
         )
@@ -187,6 +244,7 @@ def start_session(
         # Our own child, just spawned: read its start time directly rather
         # than trusting a descriptor that may not have been written.
         _terminate(proc.pid, proc_starttime(proc.pid))
+        launch_record_path(directory, name).unlink(missing_ok=True)
         tail = log_tail(log_path)
         raise LaunchError(
             f"session '{name}' did not come up within {wait:g}s.\n"
@@ -376,3 +434,86 @@ def cancel_session(info: SessionInfo, *, wait: float = 60.0) -> str:
             return "cancelled"
         time.sleep(0.5)
     return "still-busy"
+
+
+class RestartError(Exception):
+    pass
+
+
+def restart_session(
+    info: SessionInfo,
+    *,
+    wait: float | None = None,
+    stop_timeout: float = 20.0,
+    before_start=None,
+) -> tuple[SessionInfo, str]:
+    """Stop a session and start it again under the same name and options.
+
+    The Vivado executable, working directory, port, extra arguments and
+    idle stop come from the session's launch record, and the owner from its
+    descriptor, so the new session is the one `vrc start` made before. An
+    idle session gets the graceful exit; a busy one is killed, and whatever
+    it was running is lost -- a cancel first would gain nothing, since a
+    cancelled synth_design leaves the session unable to synthesise again.
+
+    ``before_start`` is called between the stop and the start, once the old
+    process's memory is free; the CLI checks free memory there. It may
+    raise to abandon the start.
+
+    Returns the new session and the old one's state ("idle", "busy", "dead").
+    """
+    if sandboxed():
+        raise RestartError(f"not restarting '{info.name}': {SANDBOX_HINT}")
+    record = read_launch_record(info)
+    if record is None:
+        raise RestartError(
+            f"session '{info.name}' has no launch record: it was attached, or "
+            f"started by an older vrc. Stop it and start it again yourself"
+        )
+    if record.gui:
+        raise RestartError(
+            f"session '{info.name}' is a GUI; close it and start it again yourself"
+        )
+    if pid_alive(info.pid) and not owns_pid(info):
+        raise RestartError(
+            f"session '{info.name}': pid {info.pid} is no longer the process this "
+            f"descriptor describes; refusing to signal it"
+        )
+
+    directory = info.path.parent if info.path else state_dir()
+    was = probe(info)
+    stop_session(info, timeout=stop_timeout, force=(was != "idle"))
+    try:
+        if before_start is not None:
+            before_start()
+        new = start_session(
+            info.name,
+            vivado=record.vivado,
+            port=record.port,
+            cwd=record.cwd,
+            wait=record.wait if wait is None else wait,
+            extra_args=record.extra_args,
+            directory=directory,
+            idle_stop=record.idle_stop,
+            owner=info.owner or None,
+        )
+    except (LaunchError, RestartError, RegistryError) as exc:
+        # The old descriptor is gone with the old process, so there is
+        # nothing left to restart; say how to start it by hand.
+        raise RestartError(
+            f"{info.name}: stopped, but not started again: {exc}\n"
+            f"start it with: {start_command(info.name, record)}"
+        ) from None
+    return new, was
+
+
+def start_command(name: str, record: LaunchRecord) -> str:
+    """The `vrc start` line that launches a session like ``record``."""
+    argv = ["vrc", "start", name, "--vivado", record.vivado, "--cwd", record.cwd]
+    if record.port:
+        argv += ["--port", str(record.port)]
+    if record.idle_stop:
+        argv += ["--idle-stop", f"{record.idle_stop}s"]
+    for arg in record.extra_args:
+        argv += [f"--arg={arg}"]
+    return shlex.join(argv)

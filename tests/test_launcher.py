@@ -7,6 +7,7 @@ eval -> stop including setsid, log redirection and killpg, with no Vivado.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 from conftest import FAKE_VIVADO, tcl_env
@@ -347,3 +348,101 @@ def test_stop_reports_when_it_cannot_verify(registry_dir):
     finally:
         victim.kill()
         victim.wait()
+
+
+# -- restart -------------------------------------------------------------------
+
+
+def test_start_writes_a_launch_record(registry_dir, fake_vivado_env, tmp_path):
+    info = launcher.start_session(
+        "rec", vivado=fake_vivado_env, wait=60.0, directory=registry_dir,
+        cwd=str(tmp_path), extra_args=["-notrace"], idle_stop=3600,
+    )
+    try:
+        record = launcher.read_launch_record(info)
+        assert record == launcher.LaunchRecord(
+            vivado=fake_vivado_env, cwd=str(tmp_path), extra_args=["-notrace"],
+            idle_stop=3600, wait=60.0,
+        )
+    finally:
+        launcher.stop_session(info, force=True)
+    assert not (registry_dir / "rec.launch").exists()
+
+
+def test_restart_an_idle_session(started, registry_dir, tmp_path):
+    new, was = launcher.restart_session(started)
+    try:
+        assert was == "idle"
+        assert new.name == started.name
+        assert new.pid != started.pid
+        assert not registry.pid_alive(started.pid)
+        assert new.owner == started.owner
+        assert launcher.read_launch_record(new) == launcher.read_launch_record(started)
+        with Session(new) as client:
+            assert client.run("expr {3 * 3}") == "9"
+    finally:
+        launcher.stop_session(new, force=True)
+
+
+def test_restart_kills_a_running_command(started):
+    with Session(started) as client:
+        client.send("after 60000")
+    deadline = time.monotonic() + 10
+    while registry.probe(started) != registry.BUSY and time.monotonic() < deadline:
+        time.sleep(0.1)
+    t0 = time.monotonic()
+    new, was = launcher.restart_session(started)
+    try:
+        assert was == "busy"
+        # Killed at once, not left to the 20 s graceful exit.
+        assert time.monotonic() - t0 < 15
+        assert registry.probe(new) == registry.IDLE
+    finally:
+        launcher.stop_session(new, force=True)
+
+
+def test_restart_a_session_that_died(started):
+    launcher._terminate(started.pid, started.starttime)
+    new, was = launcher.restart_session(started)
+    try:
+        assert was == "dead"
+        assert registry.probe(new) == registry.IDLE
+    finally:
+        launcher.stop_session(new, force=True)
+
+
+def test_restart_refuses_without_a_launch_record(started, registry_dir):
+    (registry_dir / "unit.launch").unlink()
+    with pytest.raises(launcher.RestartError, match="no launch record"):
+        launcher.restart_session(started)
+    assert registry.probe(started) == registry.IDLE
+
+
+def test_restart_refuses_inside_the_sandbox(started, monkeypatch):
+    monkeypatch.setenv("SANDBOX_RUNTIME", "1")
+    with pytest.raises(launcher.RestartError, match="sandboxed"):
+        launcher.restart_session(started)
+
+
+def test_restart_that_cannot_start_says_how_to(started, registry_dir):
+    def refuse():
+        raise launcher.RestartError("not enough memory")
+
+    with pytest.raises(launcher.RestartError) as exc:
+        launcher.restart_session(started, before_start=refuse)
+    msg = str(exc.value)
+    assert "stopped, but not started again: not enough memory" in msg
+    assert "start it with: vrc start unit --vivado " in msg
+    assert not registry.pid_alive(started.pid)
+    assert not (registry_dir / "unit.session").exists()
+
+
+def test_start_command_round_trips_the_options():
+    record = launcher.LaunchRecord(
+        vivado="/opt/v/vivado", cwd="/w d", port=4000, extra_args=["-tclargs", "a b"],
+        idle_stop=7200,
+    )
+    assert launcher.start_command("w0", record) == (
+        "vrc start w0 --vivado /opt/v/vivado --cwd '/w d' --port 4000 "
+        "--idle-stop 7200s --arg=-tclargs '--arg=a b'"
+    )

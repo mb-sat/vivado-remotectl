@@ -243,7 +243,7 @@ the step can be run again; a cancelled `synth_design` leaves no design.
 | exit 0, `nothing running` | no signal was sent |
 | exit 3, `cannot be cancelled` | a GUI, an attached Vivado, or a session from an older `vrc`; restart it. Do not send it SIGINT by hand, which leaves it unable to answer |
 | exit 4, still busy | the script caught the error in a `catch` and continued |
-| exit 5, Vivado exited | the session crashed; start it again |
+| exit 5, Vivado exited | the session crashed; `vrc restart NAME` starts it again with the same options |
 
 Vivado 2023.2 crashed once in thirteen cancelled `route_design` runs, in the
 router. Write a checkpoint before cancelling anything that took long to reach.

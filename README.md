@@ -196,6 +196,36 @@ cancels the command but leaves the plugin unable to answer anything again.
 Sessions started by an older `vrc` are refused for the same reason and need a
 restart.
 
+## Restart a session that is stuck or no longer usable
+
+`vrc restart` stops a session and starts it again under the same name, with
+the Vivado, working directory, port, `--arg` values and `--idle-stop` that
+`vrc start` gave it:
+
+```console
+$ vrc restart w2
+w2: restarted, its running command killed; listening on 127.0.0.1:41233 (pid 88120)
+```
+
+An idle session gets the graceful exit, and a busy one is killed at once, so
+whatever it was running is lost. It also brings back a session that has died,
+as long as its descriptor is still there.
+
+Restart rather than cancel when the session will not be used for the same
+work again. After a cancelled `synth_design`, the next one in that session
+fails with `invalid command name "NULL"`. A long series of runs leaves 40 to
+80 MB per run behind. A pool worker whose job was withdrawn has nothing worth
+keeping.
+
+`vrc start` writes how it launched the session to `<name>.launch` beside the
+descriptor. A Vivado attached through `Vivado_init.tcl`, a GUI session, and a
+session from an older `vrc` have no usable record and are refused.
+
+`--min-free` works as for `vrc start` (default 6 GB), but it counts the
+memory after the old process has exited. If the new start fails or is
+refused, the old session is already gone. `vrc restart` then exits 3 and
+prints the `vrc start` line that brings it back.
+
 ## Attach to a Vivado you started yourself
 
 An interactive or GUI Vivado can register itself, and then it shows up in
@@ -322,6 +352,7 @@ vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
                                       --min-free GB --idle-stop DUR
                                       --cwd DIR --gui --wait SEC --arg ARG
 vrc stop  [NAME]   shut one down      --mine --all --force --timeout SEC
+vrc restart [NAME] stop, start again  --min-free GB --wait SEC
 vrc cancel [NAME]  cancel the command --wait SEC
 vrc wait  [NAME]   wait, last result  --timeout SEC
 vrc result [NAME]  last result now

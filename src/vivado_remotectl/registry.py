@@ -217,9 +217,9 @@ def last_change(info: SessionInfo, status: str) -> int | None:
 
 
 def remove_files(info: SessionInfo) -> None:
-    """Delete the descriptor and the plugin's per-request files."""
+    """Delete the descriptor, the plugin's per-request files and the launch record."""
     paths = [info.path] if info.path else []
-    paths += [info.sidecar(ext) for ext in ("running", "result")]
+    paths += [info.sidecar(ext) for ext in ("running", "result", "launch")]
     for path in paths:
         try:
             path.unlink(missing_ok=True)
