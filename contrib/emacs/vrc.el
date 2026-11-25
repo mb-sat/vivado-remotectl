@@ -7,7 +7,7 @@
 ;; Author: Hannes Klas <hannes.klas@mb-satellite.com>
 ;; Keywords: hardware, tools, processes
 ;; Package-Requires: ((emacs "28.1"))
-;; URL: https://git.mb-satellite.com/vivado-remotectl
+;; URL: https://github.com/mb-sat/vivado-remotectl
 
 ;;; Commentary:
 

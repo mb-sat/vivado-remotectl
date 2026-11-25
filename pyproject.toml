@@ -17,6 +17,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
+[project.urls]
+Repository = "https://github.com/mb-sat/vivado-remotectl"
+
 [project.scripts]
 vivado-remotectl = "vivado_remotectl.cli:main"
 vrc = "vivado_remotectl.cli:main"
