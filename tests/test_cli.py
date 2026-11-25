@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -188,8 +189,6 @@ def test_list_shows_the_session(live, capsys):
 
 
 def test_list_json_is_machine_readable(live, capsys):
-    import json
-
     assert main(["list", "--json"]) == EXIT_OK
     rows = json.loads(capsys.readouterr().out)
     assert [r["name"] for r in rows] == ["cli"]
@@ -202,6 +201,22 @@ def test_info_shows_the_descriptor(live, capsys):
     out = capsys.readouterr().out
     assert "starttime" not in out  # not interesting to a human
     assert "status" in out and "idle" in out
+
+
+def test_info_names_the_open_project(live, capsys):
+    assert main(["-e", "proc current_project {args} { return dut }"]) == EXIT_OK
+    assert main(["-e", "set kept 42"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["info", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["project"] == "dut"
+    # Asking must not replace the last result.
+    assert main(["result"]) == EXIT_OK
+    assert capsys.readouterr().out.strip() == "42"
+
+
+def test_info_without_a_project(live, capsys):
+    assert main(["info", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["project"] == "-"
 
 
 def test_log_prints_the_session_log(live, capsys):

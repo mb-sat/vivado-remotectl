@@ -153,7 +153,8 @@ sent. A header `<status> <nbytes> <started> <finished>`, a newline, then
 cancelled request is an `err` whose payload starts `cancelled by vrc cancel`.
 
 The scripts `expr 1`, `info patchlevel` and `version -short`, which clients
-send as liveness checks, leave both files alone. `vrc wait` relies on that: it
+send as liveness checks, and `::vrc::project`, which `vrc info` sends for the
+name of the open project, leave both files alone. `vrc wait` relies on that: it
 sends `expr 1`, which queues behind the running script and so returns the
 moment it ends, then reads `<name>.result`. A plugin exiting through `exit`
 deletes both files with the descriptor.

@@ -57,7 +57,16 @@ namespace eval ::vrc {
     # the readiness poll of `vrc start` (info patchlevel) and `vrc ping`.
     # They are not recorded as the last result and do not count as activity,
     # or `vrc list` would overwrite the result it is meant to help recover.
-    variable QUIET [list "expr 1" "info patchlevel" "version -short"]
+    # `vrc info` asks for the open project (::vrc::project) the same way.
+    variable QUIET [list "expr 1" "info patchlevel" "version -short" \
+                        "::vrc::project"]
+}
+
+# Name of the open project, or empty when there is none. `vrc info` shows it,
+# to tell several sessions apart by what they hold.
+proc ::vrc::project {} {
+    if {[catch {current_project -quiet} name]} { return "" }
+    return $name
 }
 
 # ------------------------------------------------------------------------------

@@ -911,6 +911,20 @@ def cmd_ping(argv: list[str]) -> int:
     return EXIT_OK
 
 
+def _open_project(info: registry.SessionInfo) -> str:
+    """Name of the project open in an idle session, or "-".
+
+    A busy session is not asked, because the question would queue behind
+    its running script. A plugin older than ``::vrc::project`` answers with
+    an error, which is shown as "-" too.
+    """
+    try:
+        with Session(info) as session:
+            return session.run("::vrc::project", timeout=2.0).strip() or "-"
+    except Exception:
+        return "-"
+
+
 def cmd_info(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc info")
     p.add_argument("name", nargs="?")
@@ -929,6 +943,7 @@ def cmd_info(argv: list[str]) -> int:
         "port": info.port,
         "pid": info.pid,
         "status": status,
+        "project": _open_project(info) if status == "idle" else "-",
         "uptime": info.uptime,
         "tcl": info.tcl,
         "cwd": info.cwd,
