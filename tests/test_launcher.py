@@ -411,6 +411,27 @@ def test_restart_a_session_that_died(started):
         launcher.stop_session(new, force=True)
 
 
+def test_start_gives_the_session_its_own_temp_dir(started, registry_dir):
+    tmp = registry_dir / "unit.tmp"
+    assert tmp.is_dir()
+    assert f"-tempDir {tmp}" in (registry_dir / "unit.log").read_text()
+    (tmp / "scratch").write_text("x")
+    launcher.stop_session(started, force=True)
+    assert not tmp.exists()
+
+
+def test_a_tempdir_argument_replaces_the_default(registry_dir, fake_vivado_env, tmp_path):
+    info = launcher.start_session(
+        "own", directory=registry_dir, cwd=str(tmp_path),
+        extra_args=["-tempDir", str(tmp_path)],
+    )
+    try:
+        assert not (registry_dir / "own.tmp").exists()
+    finally:
+        launcher.stop_session(info, force=True)
+    assert tmp_path.is_dir()
+
+
 def test_restart_refuses_without_a_launch_record(started, registry_dir):
     (registry_dir / "unit.launch").unlink()
     with pytest.raises(launcher.RestartError, match="no launch record"):

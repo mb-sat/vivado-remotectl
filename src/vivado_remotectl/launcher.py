@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shutil
 import shlex
 import signal
 import subprocess
@@ -134,6 +135,11 @@ class LaunchRecord:
     wait: float = 180.0
 
 
+def temp_dir(directory: Path, name: str) -> Path:
+    """The ``-tempDir`` a session gets unless ``--arg -tempDir`` names another."""
+    return directory / f"{name}.tmp"
+
+
 def launch_record_path(directory: Path, name: str) -> Path:
     return directory / f"{name}.launch"
 
@@ -199,6 +205,13 @@ def start_session(
 
     mode = "gui" if gui else "tcl"
     argv = [exe, "-mode", mode, "-nolog", "-nojournal", "-source", str(plugin)]
+    if "-tempDir" not in (extra_args or []):
+        # Vivado's scratch files go beside the descriptor rather than into
+        # the shared /tmp, so stopping the session can delete them.
+        tmp = temp_dir(directory, name)
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(mode=0o700)
+        argv += ["-tempDir", str(tmp)]
     argv += extra_args or []
 
     # A GUI Vivado owns its own event loop, so the plugin must not vwait.
@@ -245,6 +258,7 @@ def start_session(
         # than trusting a descriptor that may not have been written.
         _terminate(proc.pid, proc_starttime(proc.pid))
         launch_record_path(directory, name).unlink(missing_ok=True)
+        shutil.rmtree(temp_dir(directory, name), ignore_errors=True)
         tail = log_tail(log_path)
         raise LaunchError(
             f"session '{name}' did not come up within {wait:g}s.\n"

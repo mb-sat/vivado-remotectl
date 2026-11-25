@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import re
 import socket
 import time
@@ -217,7 +218,8 @@ def last_change(info: SessionInfo, status: str) -> int | None:
 
 
 def remove_files(info: SessionInfo) -> None:
-    """Delete the descriptor, the plugin's per-request files and the launch record."""
+    """Delete the descriptor, the plugin's per-request files, the launch
+    record and the session's temp directory."""
     paths = [info.path] if info.path else []
     paths += [info.sidecar(ext) for ext in ("running", "result", "launch")]
     for path in paths:
@@ -225,6 +227,7 @@ def remove_files(info: SessionInfo) -> None:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+    shutil.rmtree(info.sidecar("tmp"), ignore_errors=True)
 
 
 def current_owner() -> str:

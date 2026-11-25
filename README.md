@@ -96,6 +96,10 @@ alive, and a script that runs longer than the limit is not cut off. `vrc info`
 shows the setting. There is no default, because a session that disappears
 under a design you meant to return to costs more than the memory it held.
 
+Each session gets its own Vivado temp directory, `<name>.tmp` beside the
+descriptor, and `vrc stop` deletes it. `--arg -tempDir --arg DIR` names
+another one, which is then left alone.
+
 `vrc start` refuses when less than 6 GB is available, because with no swap
 the OOM killer otherwise picks which Vivado dies, and lists what is holding the
 memory. `--min-free GB` changes the limit and `--min-free 0` skips the check.
@@ -363,7 +367,7 @@ vrc list           what is running    --json --prune --mine  (alias: status)
 vrc log   [NAME]   session output     -f/--follow -n LINES
 vrc repl  [NAME]   interactive prompt
 vrc ping  [NAME]   check it answers
-vrc info  [NAME]   show the descriptor
+vrc info  [NAME]   show the descriptor and the open project
 vrc plugin-path    path to the Tcl plugin
 vrc --version      version of vrc
 ```
