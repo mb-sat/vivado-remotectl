@@ -261,6 +261,99 @@ def test_reentrant_event_loop_does_not_corrupt_responses(tcl_session):
     assert results["hammer"] == "0,1,2,3,4"
 
 
+#: A slow script that blocks in `after`, and one that spins the event loop
+#: the way wait_on_run does. In the first nothing is read or accepted until it
+#: ends; in the second the queued clients are accepted and read meanwhile, so
+#: several channels hold complete frames when the script ends.
+SLOW_BLOCKING = "after 400; return slow"
+SLOW_SPINNING = "set ::d 0; after 400 {set ::d 1}; vwait ::d; return slow"
+
+
+def _queue_behind_slow(info, slow_script, sends):
+    """Run a slow script, then queue one client per entry of `sends`.
+
+    The clients connect one after another, in index order, while the slow
+    script runs; `sends` is the order they then send their request in. Each
+    request appends its index to ::order. Returns the final ::order.
+    """
+    n = len(sends)
+    slow, slow_reader = raw_connect(info)
+    slow.sendall(encode_request(slow_script, info.token))
+    time.sleep(0.15)  # let the slow script start before anyone queues
+    conns = []
+    for _ in range(n):
+        conns.append(raw_connect(info))
+        time.sleep(0.03)
+    for i in sends:
+        conns[i][0].sendall(
+            encode_request(f"lappend ::order {i}; return {i}", info.token)
+        )
+        time.sleep(0.02)
+    assert read_response(slow_reader) == ("ok", "slow")
+    for i, (_sock, reader) in enumerate(conns):
+        assert read_response(reader) == ("ok", str(i))
+    for sock, _reader in conns + [(slow, slow_reader)]:
+        sock.close()
+    with Session(info) as client:
+        order = client.run("set ::order")
+        client.run("set ::order {}")
+    return order
+
+
+def test_queued_requests_run_in_connection_order(tcl_session):
+    """Requests that queue behind a running script run in connect order.
+
+    Repeated, with the send order differing from the connect order in most
+    rounds, because the old `array names` dispatch only got it right by luck.
+    Rounds alternate between a blocking and an event-loop-spinning script.
+    """
+    with Session(tcl_session.info) as client:
+        client.run("set ::order {}")
+    sends = [
+        [0, 1, 2, 3],
+        [3, 2, 1, 0],
+        [1, 3, 0, 2],
+        [0, 1, 2, 3, 4],
+        [4, 2, 0, 3, 1],
+        [2, 0, 1, 3],
+        [3, 0, 2, 1],
+        [0, 1, 2, 3],
+        [1, 0, 3, 2],
+        [2, 3, 1, 0],
+    ]
+    for rnd, order in enumerate(sends):
+        slow = SLOW_SPINNING if rnd % 2 == 0 else SLOW_BLOCKING
+        got = _queue_behind_slow(tcl_session.info, slow, order)
+        assert got == " ".join(str(i) for i in range(len(order))), f"round {rnd}"
+
+
+def test_queued_request_runs_after_its_client_closed(tcl_session):
+    """A request still queued when its client hangs up is run, in its turn.
+
+    _readable marks the channel closing at EOF; _pump must still dispatch the
+    complete frame it buffered, and before the later connection's.
+    """
+    info = tcl_session.info
+    with Session(info) as client:
+        client.run("set ::order {}")
+    slow, slow_reader = raw_connect(info)
+    slow.sendall(encode_request("after 500; return slow", info.token))
+    time.sleep(0.15)
+    gone, _ = raw_connect(info)
+    time.sleep(0.03)
+    last, last_reader = raw_connect(info)
+    time.sleep(0.03)
+    last.sendall(encode_request("lappend ::order last; return last", info.token))
+    gone.sendall(encode_request("lappend ::order gone", info.token))
+    gone.close()
+    assert read_response(slow_reader) == ("ok", "slow")
+    assert read_response(last_reader) == ("ok", "last")
+    with Session(info) as client:
+        assert client.run("set ::order") == "gone last"
+    slow.close()
+    last.close()
+
+
 # -- shutdown ----------------------------------------------------------------
 
 

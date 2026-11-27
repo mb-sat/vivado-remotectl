@@ -49,6 +49,10 @@ namespace eval ::vrc {
     if {![info exists buf]}     { variable buf;     array set buf     {} }
     if {![info exists closing]} { variable closing; array set closing {} }
 
+    # Open channels in the order their connections were accepted. This is the
+    # order requests are served in, see _pump.
+    if {![info exists order]}   { variable order {} }
+
     variable MAX_HEADER  128
     variable MAX_PAYLOAD [expr {256 * 1024 * 1024}]
     variable VERSION     "V1"
@@ -323,6 +327,7 @@ proc ::vrc::_record_end {started status text} {
 # ------------------------------------------------------------------------------
 proc ::vrc::_accept {chan addr rport} {
     variable buf
+    variable order
 
     if {$addr ne "127.0.0.1" && $addr ne "::1"} {
         ::vrc::_log "rejected connection from $addr"
@@ -339,6 +344,7 @@ proc ::vrc::_accept {chan addr rport} {
         return
     }
     set buf($chan) ""
+    lappend order $chan
     fileevent $chan readable [list ::vrc::_readable $chan]
 }
 
@@ -355,9 +361,19 @@ proc ::vrc::_readable {chan} {
         catch {close $chan}
         return
     }
+    if {![::vrc::_fill $chan]} { return }
+    ::vrc::_pump
+}
+
+# Move whatever is waiting on a channel into its buffer, without blocking.
+# Returns 0 if the channel had to be dropped.
+proc ::vrc::_fill {chan} {
+    variable buf
+    variable closing
+
     if {[catch {read $chan} data]} {
         ::vrc::_drop $chan "read error"
-        return
+        return 0
     }
     append buf($chan) $data
 
@@ -366,22 +382,45 @@ proc ::vrc::_readable {chan} {
         # _pump retires the channel once nothing complete is left.
         set closing($chan) 1
     }
-    ::vrc::_pump
+    return 1
 }
 
 # ------------------------------------------------------------------------------
 # Dispatch at most one request, then return. _exec reschedules us with
 # `after idle`, so a pipelined second request is handled on the next turn of
 # the event loop rather than recursively.
+#
+# Ordering: requests are served in the order their connections were accepted,
+# and on one connection in the order sent. Connections are accepted in the
+# order they were made (listen-backlog order), so this is the order clients
+# connected. A connection that has not sent a complete frame yet does not hold
+# up later ones: the earliest connection with a complete frame goes first.
+#
+# While a script runs, no fileevent is serviced unless the script re-enters
+# the event loop, so clients that queued meanwhile have their bytes unread in
+# the kernel, and whichever channel's event fires first would otherwise be the
+# only one with a buffered frame. Hence the drain: before choosing, read what
+# is pending on every open channel. It is a non-blocking read and runs only
+# here, never while `busy`, so it cannot run inside a script that spins the
+# event loop (wait_on_run, vwait); those events reach _readable, whose _pump
+# returns at once. No `update` or `after idle` is needed to order accepts: a
+# connection is accepted only after all earlier ones, so every connection that
+# is still unaccepted is later than every accepted one.
 # ------------------------------------------------------------------------------
 proc ::vrc::_pump {} {
     variable busy
     variable buf
     variable closing
+    variable order
 
     if {$busy} { return }
 
-    foreach chan [array names buf] {
+    foreach chan $order {
+        if {[info exists buf($chan)] && ![info exists closing($chan)]} {
+            ::vrc::_fill $chan
+        }
+    }
+    foreach chan $order {
         if {[::vrc::_try_one $chan]} { return }
     }
     # Nothing dispatchable anywhere: retire half-closed channels.
@@ -592,9 +631,12 @@ proc ::vrc::_respond {chan status text} {
 proc ::vrc::_drop {chan why} {
     variable buf
     variable closing
+    variable order
 
     catch {fileevent $chan readable {}}
     catch {close $chan}
+    set i [lsearch -exact $order $chan]
+    if {$i >= 0} { set order [lreplace $order $i $i] }
     unset -nocomplain buf($chan)
     unset -nocomplain closing($chan)
 }
