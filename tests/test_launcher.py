@@ -58,9 +58,90 @@ def test_find_vivado_rejects_a_bad_explicit_path():
         launcher.find_vivado("/nonexistent/vivado")
 
 
-def test_find_vivado_reports_available_versions():
-    with pytest.raises(LaunchError, match="no Vivado 1999.1"):
+def _install(root, relative):
+    exe = root / relative / "bin" / "vivado"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    return str(exe)
+
+
+@pytest.fixture
+def installs(tmp_path, monkeypatch):
+    """Fake installs in both layouts, with no vivado on PATH."""
+    old = tmp_path / "old" / "Vivado"
+    new = tmp_path / "new"
+    exes = {
+        "2023.2": _install(old, "2023.2"),
+        "2024.2": _install(old, "2024.2"),
+        "2024.10": _install(old, "2024.10"),
+        "2025.1": _install(new, "2025.1/Vivado"),
+    }
+    (old / "junk" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("VRC_VIVADO_ROOT", f"{old}:{new}")
+    monkeypatch.delenv("VRC_VIVADO", raising=False)
+    monkeypatch.delenv("VRC_VIVADO_VERSION", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    return exes
+
+
+def test_find_vivado_reports_available_versions(installs):
+    expected = r"no Vivado 1999.1 .*have: 2023.2, 2024.2, 2024.10, 2025.1"
+    with pytest.raises(LaunchError, match=expected):
         launcher.find_vivado(version="1999.1")
+
+
+def test_find_vivado_takes_the_newest_install_numerically(installs):
+    assert launcher.find_vivado() == installs["2025.1"]
+
+
+def test_find_vivado_sorts_versions_numerically_within_a_layout(installs, monkeypatch, tmp_path):
+    monkeypatch.setenv("VRC_VIVADO_ROOT", str(tmp_path / "old" / "Vivado"))
+    assert launcher.find_vivado() == installs["2024.10"]
+
+
+def test_find_vivado_sorts_point_releases(tmp_path, monkeypatch):
+    first = _install(tmp_path, "2023.2")
+    second = _install(tmp_path, "2023.2.2")
+    monkeypatch.setenv("VRC_VIVADO_ROOT", str(tmp_path))
+    monkeypatch.delenv("VRC_VIVADO", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert launcher.find_vivado() == second
+    assert launcher.find_vivado(version="2023.2") == first
+
+
+def test_find_vivado_version_picks_either_layout(installs):
+    assert launcher.find_vivado(version="2023.2") == installs["2023.2"]
+    assert launcher.find_vivado(version="2025.1") == installs["2025.1"]
+
+
+def test_find_vivado_prefers_path_over_installs(installs, tmp_path, monkeypatch):
+    bindir = tmp_path / "pathbin"
+    on_path = _install(bindir, ".")
+    monkeypatch.setenv("PATH", str(bindir / "." / "bin"))
+    assert launcher.find_vivado() == on_path
+
+
+def test_find_vivado_env_executable_beats_path_and_installs(installs, tmp_path, monkeypatch):
+    chosen = _install(tmp_path / "chosen", "x")
+    monkeypatch.setenv("VRC_VIVADO", chosen)
+    assert launcher.find_vivado() == chosen
+    # An explicit --version still wins over $VRC_VIVADO.
+    assert launcher.find_vivado(version="2023.2") == installs["2023.2"]
+
+
+def test_find_vivado_version_env_is_the_default_version(installs, monkeypatch):
+    monkeypatch.setenv("VRC_VIVADO_VERSION", "2024.2")
+    assert launcher.find_vivado() == installs["2024.2"]
+    assert launcher.find_vivado(version="2023.2") == installs["2023.2"]
+
+
+def test_find_vivado_without_any_install_says_how_to_point_at_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("VRC_VIVADO_ROOT", str(tmp_path / "none"))
+    monkeypatch.delenv("VRC_VIVADO", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(LaunchError, match="VRC_VIVADO_ROOT"):
+        launcher.find_vivado()
 
 
 def test_start_refuses_inside_the_sandbox(registry_dir, monkeypatch):

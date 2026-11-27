@@ -529,7 +529,7 @@ def cmd_start(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="vrc start")
     p.add_argument("name", nargs="?", default="default")
     p.add_argument("--vivado", metavar="PATH")
-    p.add_argument("--version", metavar="VER", help="e.g. 2023.2")
+    p.add_argument("--version", metavar="VER", help="e.g. 2024.2; default $VRC_VIVADO_VERSION")
     p.add_argument("--port", type=int, default=0, help="0 (default) = any free port")
     p.add_argument("--cwd", metavar="DIR")
     p.add_argument("--gui", action="store_true", help="launch -mode gui")

@@ -491,6 +491,8 @@ spellings are what people already type.
 |---|---|
 | `VIVADO_REMOTECTL_SESSION` | default session name, instead of `-s` |
 | `VRC_VIVADO` | vivado executable to launch |
+| `VRC_VIVADO_VERSION` | release to launch when `--version` is not given, e.g. `2024.2` |
+| `VRC_VIVADO_ROOT` | colon-separated install roots to search, instead of the defaults |
 | `VRC_DIR` | where session descriptors live |
 | `VRC_OWNER` | owner `vrc start` records, instead of the Claude session or user |
 | `XDG_STATE_HOME` | base for the default descriptor directory |
@@ -499,8 +501,16 @@ Descriptors default to `~/.local/state/vivado-remotectl/`, under *state*
 rather than cache on purpose: a cache cleaner removing the token of a live
 half-hour synthesis would be a bad afternoon.
 
-Without `--vivado` or `--version`, `vrc` looks at `$VRC_VIVADO`, then
-`/tools/Xilinx/Vivado/*/bin/vivado` preferring 2023.2, then `PATH`.
+Without `--vivado` or `--version`, `vrc start` uses `$VRC_VIVADO`, then the
+`vivado` on `PATH` (the one `settings64.sh` put there), then the newest
+install found under the install roots. Versions are compared numerically, so
+2024.2 is older than 2025.1. `--version VER`, or `$VRC_VIVADO_VERSION` as its
+default, picks that release from the install roots instead.
+
+The install roots are `$VRC_VIVADO_ROOT` if set, otherwise `/tools/Xilinx/Vivado`,
+`/opt/Xilinx/Vivado`, `/tools/Xilinx` and `/opt/Xilinx`. A root may hold
+`<ver>/bin/vivado` (up to 2024.2) or `<ver>/Vivado/bin/vivado` (2025.1 and
+later); both layouts are recognised under every root.
 
 ## How it is put together
 

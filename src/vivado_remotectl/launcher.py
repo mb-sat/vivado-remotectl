@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -30,11 +31,17 @@ from .registry import (
     validate_name,
 )
 
-#: Preferred when several installs are present; it is the version the
-#: existing tooling and constraints were built against.
-PREFERRED_VERSION = "2023.2"
+#: Where Vivado installs are looked for when ``$VRC_VIVADO_ROOT`` is not set.
+#: A root holds either ``<ver>/bin/vivado`` (the directory is ``.../Vivado``,
+#: releases up to 2024.2) or ``<ver>/Vivado/bin/vivado`` (2025.1 and later).
+DEFAULT_ROOTS = (
+    "/tools/Xilinx/Vivado",
+    "/opt/Xilinx/Vivado",
+    "/tools/Xilinx",
+    "/opt/Xilinx",
+)
 
-VIVADO_GLOB = "/tools/Xilinx/Vivado/*/bin/vivado"
+_VERSION_RE = re.compile(r"\d+(\.\d+)+")
 
 
 class LaunchError(Exception):
@@ -45,11 +52,37 @@ def plugin_path() -> Path:
     return Path(__file__).resolve().parent / "tcl" / "vivado_remotectl.tcl"
 
 
+def version_key(version: str) -> tuple[int, ...]:
+    """Sort key that orders 2023.2 < 2023.2.2 < 2024.1 numerically."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def install_roots() -> list[str]:
+    env = os.environ.get("VRC_VIVADO_ROOT")
+    if env:
+        return [root for root in env.split(":") if root]
+    return list(DEFAULT_ROOTS)
+
+
+def installed_versions(roots: list[str] | None = None) -> dict[str, str]:
+    """Version -> vivado executable for every install under the roots."""
+    found: dict[str, str] = {}
+    for root in roots if roots is not None else install_roots():
+        for pattern in ("*/bin/vivado", "*/Vivado/bin/vivado"):
+            for candidate in sorted(glob.glob(os.path.join(glob.escape(root), pattern))):
+                parts = Path(candidate).parts
+                ver = parts[-3] if pattern == "*/bin/vivado" else parts[-4]
+                if _VERSION_RE.fullmatch(ver) and os.access(candidate, os.X_OK):
+                    found.setdefault(ver, candidate)
+    return found
+
+
 def find_vivado(path: str | None = None, version: str | None = None) -> str:
     """Locate a vivado executable.
 
-    ``vivado`` is normally not on PATH on this host -- it lives under
-    /tools/Xilinx and needs settings64.sh -- so the glob comes first.
+    Order without ``path`` or ``version``: ``$VRC_VIVADO``, then ``vivado`` on
+    PATH, then the newest install under the install roots. ``version`` (or
+    ``$VRC_VIVADO_VERSION``) picks that release from the roots instead.
     """
     if path:
         if not os.access(path, os.X_OK):
@@ -62,30 +95,27 @@ def find_vivado(path: str | None = None, version: str | None = None) -> str:
             raise LaunchError(f"$VRC_VIVADO is not executable: {env}")
         return env
 
-    found: dict[str, str] = {}
-    for candidate in glob.glob(VIVADO_GLOB):
-        ver = Path(candidate).parent.parent.name
-        if os.access(candidate, os.X_OK):
-            found[ver] = candidate
-
+    version = version or os.environ.get("VRC_VIVADO_VERSION") or None
+    roots = install_roots()
     if version:
+        found = installed_versions(roots)
         if version not in found:
-            have = ", ".join(sorted(found)) or "none"
-            raise LaunchError(f"no Vivado {version} under /tools/Xilinx (have: {have})")
+            have = ", ".join(sorted(found, key=version_key)) or "none"
+            raise LaunchError(
+                f"no Vivado {version} under {':'.join(roots)} (have: {have}); "
+                "set $VRC_VIVADO_ROOT if it is installed elsewhere"
+            )
         return found[version]
 
-    if PREFERRED_VERSION in found:
-        return found[PREFERRED_VERSION]
-    if found:
-        return found[sorted(found)[-1]]
-
-    from shutil import which
-
-    on_path = which("vivado")
+    on_path = shutil.which("vivado")
     if on_path:
         return on_path
+    found = installed_versions(roots)
+    if found:
+        return found[max(found, key=version_key)]
     raise LaunchError(
-        "no vivado found; pass --vivado PATH, --version VER, or set $VRC_VIVADO"
+        "no vivado found; source settings64.sh, pass --vivado PATH or --version VER, "
+        "or set $VRC_VIVADO or $VRC_VIVADO_ROOT"
     )
 
 
