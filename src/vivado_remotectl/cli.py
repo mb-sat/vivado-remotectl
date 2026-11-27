@@ -48,7 +48,7 @@ EXIT_INTERRUPTED = 130
 
 SUBCOMMANDS = (
     "start", "stop", "restart", "cancel", "wait", "result", "list", "log", "repl", "ping",
-    "status", "info", "plugin-path",
+    "status", "info", "plugin-path", "pool",
 )
 
 USAGE = """\
@@ -74,6 +74,8 @@ Subcommands (must come first):
   vrc ping  [NAME]   check a session answers
   vrc info  [NAME]   show a session's descriptor
   vrc plugin-path    path to the Tcl plugin, for Vivado_init.tcl
+  vrc pool run       run a list of Tcl jobs across several sessions
+  vrc pool status    show how a pool's jobs stand
   vrc --version      the version of vrc itself
 
 Examples:
@@ -1020,6 +1022,13 @@ def cmd_plugin_path(argv: list[str]) -> int:
     return EXIT_OK
 
 
+def cmd_pool(argv: list[str]) -> int:
+    # Imported here: the pool is the one subcommand with its own module.
+    from .pool import main as pool_main
+
+    return pool_main(argv)
+
+
 HANDLERS = {
     "start": cmd_start,
     "stop": cmd_stop,
@@ -1035,6 +1044,7 @@ HANDLERS = {
     "ping": cmd_ping,
     "info": cmd_info,
     "plugin-path": cmd_plugin_path,
+    "pool": cmd_pool,
 }
 
 
