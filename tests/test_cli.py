@@ -323,8 +323,11 @@ def test_wait_on_an_idle_session_returns_at_once(live, capsys):
 # -- memory --------------------------------------------------------------------
 
 
-def test_list_shows_memory_per_session_and_in_total(live, capsys):
+def test_list_shows_memory_per_session_and_in_total(live, capsys, monkeypatch):
     import json
+
+    # Vivados running on this machine outside the test would be counted too.
+    monkeypatch.setattr("vivado_remotectl.procinfo.stray_vivados", lambda *a, **k: [])
 
     assert main(["list"]) == EXIT_OK
     out = capsys.readouterr()
@@ -508,3 +511,25 @@ def test_restart_refuses_to_start_short_of_memory(live, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert "stopped, but not started again: not starting 'cli'" in err
     assert "start it with: vrc start cli --vivado " in err
+
+
+# -- script arguments ---------------------------------------------------------
+
+AWKWARD_ARGS = ["plain", "", "two words", "a{b", "c}d", "$x [exit] \"q\"", "back\\slash\\",
+                "semi;colon", "#hash", "line\nbreak", "-dash", "ünï"]
+
+
+def test_arguments_after_dashdash_become_argv(live, capsys):
+    assert main(["-e", "return [llength $::argv]:$::argc", "--", *AWKWARD_ARGS]) == EXIT_OK
+    n = len(AWKWARD_ARGS)
+    assert capsys.readouterr().out.strip() == f"{n}:{n}"
+    for i, arg in enumerate(AWKWARD_ARGS):
+        assert main(["-e", f"lindex $::argv {i}", "--", *AWKWARD_ARGS]) == EXIT_OK
+        assert capsys.readouterr().out == (arg + "\n" if arg else "")
+
+
+def test_dashdash_with_no_arguments_empties_argv(live, capsys):
+    assert main(["-e", "set ::argv stale", "-e", "return ok"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["-e", "llength $::argv", "--"]) == EXIT_OK
+    assert capsys.readouterr().out.strip() == "0"

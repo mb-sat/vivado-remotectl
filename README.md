@@ -38,6 +38,12 @@ vrc -f setup.tcl -e 'synth_design -top top -part xcvc1902-vsva2197-2MP-e-S'
 echo 'report_utilization -return_string' | vrc -f -
 ```
 
+Anything after `--` is the script's arguments, in `$::argv` as under `tclsh`:
+
+```sh
+vrc -f synth.tcl -- top_a 2.5     # lindex $::argv 0 is top_a
+```
+
 The result goes to stdout and nothing else does, so `vrc -f ooc.tcl > wns.txt`
 gives you a clean file. A script that fails prints Tcl's `errorInfo` to stderr
 and exits 1; the session survives and keeps its state.
@@ -354,6 +360,7 @@ the whole loop, and has the rest of the keys and settings.
 
 ```
 vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
+    [-- ARG...]
 
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
                                       --min-free GB --idle-stop DUR

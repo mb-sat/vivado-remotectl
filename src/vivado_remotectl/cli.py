@@ -35,6 +35,7 @@ from .launcher import (
 )
 from .protocol import ProtocolError, RemoteTclError, SessionDied
 from .registry import RegistryError
+from .tclquote import with_argv
 
 EXIT_OK = 0
 EXIT_TCL_ERROR = 1
@@ -52,10 +53,11 @@ SUBCOMMANDS = (
 
 USAGE = """\
 vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
+    [-- ARG...]
 
   Evaluate Tcl in a running Vivado session and print the result.
   -e and -f may both be repeated; they are concatenated in argument order.
-  -f - reads from stdin. --detach returns once the script has started;
+  -f - reads from stdin. Anything after -- is the script's $::argv. --detach returns once the script has started;
   collect its result with vrc wait.
 
 Subcommands (must come first):
@@ -240,8 +242,27 @@ def _shell_quote(text: str) -> str:
     return shlex.quote(text)
 
 
+#: Eval options that take a value, so a `--` after one is that value.
+_VALUE_OPTIONS = ("-s", "--session", "-p", "--port", "-e", "--eval", "-f", "--file", "--timeout")
+
+
+def split_script_args(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Cut ``argv`` at the first ``--``: options before, script arguments after.
+
+    Returns None for the arguments when there is no ``--``, which leaves the
+    session's ``::argv`` as it was.
+    """
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--":
+            return argv[:i], argv[i + 1 :]
+        i += 2 if argv[i] in _VALUE_OPTIONS else 1
+    return argv, None
+
+
 def cmd_eval(argv: list[str]) -> int:
     parser = build_eval_parser()
+    argv, script_args = split_script_args(argv)
     args, leftover = parser.parse_known_args(argv)
     if args.help:
         print(USAGE, end="")
@@ -257,6 +278,8 @@ def cmd_eval(argv: list[str]) -> int:
         script = assemble_script(parts)
     except RegistryError as exc:
         return die(str(exc))
+    if script_args is not None:
+        script = with_argv(script, script_args)
 
     timeout = args.timeout if args.timeout else None  # 0 means forever
 
