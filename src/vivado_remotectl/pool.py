@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import sys
 import threading
@@ -558,6 +559,21 @@ class Pool:
                 stop_session(info, force=True)
         except (RegistryError, OSError) as exc:
             self.log(f"could not stop {worker.name}: {exc}")
+        self._keep_logs(worker)
+
+    def _keep_logs(self, worker: Worker) -> None:
+        """Move a stopped worker's session logs into the output directory.
+
+        Its name is unique to this pool, so nothing would ever reuse or
+        rotate them where they are.
+        """
+        for suffix in (".log", ".log.1"):
+            src = self.directory / f"{worker.name}{suffix}"
+            try:
+                if src.exists():
+                    shutil.move(str(src), str(self.out / src.name))
+            except OSError as exc:
+                self.log(f"could not move {src}: {exc}")
 
     # -- running the pool --------------------------------------------------
 

@@ -173,7 +173,9 @@ The stdout line of a finished job is `name session state seconds`. Its result
 is in `<out>/<name>.out`, or its `errorInfo` in `<out>/<name>.err`, and
 `<out>/status.json` is rewritten after every change, so the jobs can be
 followed, and collected, from a shell other than the one that started the
-pool. `vrc pool status <out>` prints that file as a table. A pool that outlasts
+pool. `vrc pool status <out>` prints that file as a table. The session logs
+of the workers the pool started are moved into `<out>` when it stops them. A
+pool that outlasts
 the calling shell's time limit belongs in the background, with the results
 read from `--out`.
 
