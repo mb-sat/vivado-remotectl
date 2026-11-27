@@ -352,12 +352,28 @@ def cmd_eval(argv: list[str]) -> int:
 DETACH_CONFIRM = 10.0
 
 
-def _detach(info: registry.SessionInfo, script: str) -> int:
-    """Hand a script to an idle session and return once it is running.
+def _result_stamp(info: registry.SessionInfo) -> tuple[int, int] | None:
+    """Identity of the result file: changes whenever the plugin rewrites it.
 
-    Only an idle session takes one: two queued requests are dispatched in no
-    fixed order, so a `vrc wait` queued behind a detached script could run
-    first and report the result before it.
+    The timestamps inside are whole seconds, so a result from the same second
+    as a new request cannot be told apart by them; the file's own mtime can.
+    """
+    try:
+        st = info.sidecar("result").stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_ino)
+
+
+def _detach(info: registry.SessionInfo, script: str) -> int:
+    """Hand a script to a session and return without waiting for it to finish.
+
+    An idle session starts it at once, and we return when `<name>.running`
+    (or a new `<name>.result`) shows that it has. A busy session serves
+    requests in the order their connections were made, so the script is
+    queued behind what is running: it is sent and the connection closed, since
+    the plugin runs a request whose client has gone. `vrc wait` then queues
+    behind it and so returns this script's result, not the running one's.
     """
     if not info.results:
         return die(
@@ -366,25 +382,38 @@ def _detach(info: registry.SessionInfo, script: str) -> int:
             EXIT_NO_SESSION,
         )
     status = registry.probe(info)
-    if status != registry.IDLE:
-        running = registry.read_running(info)
-        what = f": {running.first_line}" if running else ""
+    if status not in (registry.IDLE, registry.BUSY):
         return die(
-            f"session '{info.name}' is {status}{what}; --detach only hands a "
-            f"script to an idle session (vrc wait {info.name})",
+            f"session '{info.name}' is {status}; cannot hand it a script",
             EXIT_NO_SESSION,
         )
 
+    if status == registry.BUSY:
+        running = registry.read_running(info)
+        try:
+            with Session(info) as client:
+                client.send(script)
+        except ConnectFailed as exc:
+            return die(str(exc), EXIT_NO_SESSION)
+        except OSError as exc:
+            return die(str(exc), EXIT_DIED)
+        what = f"'{running.first_line}'" if running else "the running script"
+        print(
+            f"{info.name}: queued behind {what}; collect it with vrc wait {info.name}",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+
     sent = int(time.time())
+    before = _result_stamp(info)
     try:
         with Session(info) as client:
             client.send(script)
             deadline = time.monotonic() + DETACH_CONFIRM
             while time.monotonic() < deadline:
                 running = registry.read_running(info)
-                last = registry.read_result(info)
                 if (running and running.started >= sent) or (
-                    last and last.started >= sent
+                    _result_stamp(info) not in (None, before)
                 ):
                     break
                 time.sleep(0.1)

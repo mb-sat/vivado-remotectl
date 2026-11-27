@@ -163,10 +163,13 @@ vrc -s dut --detach -f ooc.tcl     # returns once synthesis has started
 vrc wait dut > wns.txt             # exits 0, 1 or 6 like the original call
 ```
 
-`--detach` only hands a script to an idle session, because two queued scripts
-run in no fixed order and `vrc wait` could otherwise return the earlier one.
-The same works for a client that died, was interrupted or timed out: `vrc wait`
-picks up where it stopped. `vrc wait --timeout SEC` exits 4 if the session is
+A session serves queued requests in the order their clients connected, so
+`--detach` on a busy session queues the script behind what is running and says
+so on stderr (`dut: queued behind 'FIRST LINE'; collect it with vrc wait dut`).
+`vrc wait` connects after it, so it returns the result of the last script
+queued before it, not of the one that was running. The same works for a
+client that died, was interrupted or timed out: `vrc wait` picks up where it
+stopped. `vrc wait --timeout SEC` exits 4 if the session is
 still busy and names what it is running.
 
 ## Cancel a synthesis, placement or routing

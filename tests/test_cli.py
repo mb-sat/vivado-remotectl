@@ -284,13 +284,41 @@ def test_detach_then_wait(live, capsys):
     assert capsys.readouterr().out == "late\n"
 
 
-def test_detach_refuses_a_busy_session(live, capsys):
-    assert main(["--detach", "-e", "after 2000"]) == EXIT_OK
+def test_detach_queues_behind_a_busy_session(live, capsys):
+    assert main(["--detach", "-e", "after 1500; return first"]) == EXIT_OK
     capsys.readouterr()
-    assert main(["--detach", "-e", "return second"]) == EXIT_NO_SESSION
-    err = capsys.readouterr().err
-    assert "busy: after 2000" in err
+    assert main(["--detach", "-e", "return second"]) == EXIT_OK
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "queued behind 'after 1500; return first'" in out.err
+    assert "vrc wait cli" in out.err
+    # wait queues behind both, so it reports the last one, not the running one
     assert main(["wait"]) == EXIT_OK
+    assert capsys.readouterr().out == "second\n"
+
+
+def test_detach_queues_several_in_order(live, capsys):
+    assert main(["-e", "set ::log {}"]) == EXIT_OK
+    assert main(["--detach", "-e", "after 1000; lappend ::log a"]) == EXIT_OK
+    for tag in "bcd":
+        assert main(["--detach", "-e", f"lappend ::log {tag}"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["wait"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["-e", "set ::log"]) == EXIT_OK
+    assert capsys.readouterr().out == "a b c d\n"
+
+
+def test_detach_confirmation_ignores_a_result_from_the_same_second(live, capsys):
+    # Two quick detaches back to back: the second must not take the first's
+    # result file, written in the same second, as proof that it has started.
+    assert main(["--detach", "-e", "return one"]) == EXIT_OK
+    assert main(["wait"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["--detach", "-e", "after 1500; return two"]) == EXIT_OK
+    assert registry.read_running(live) is not None
+    assert main(["wait"]) == EXIT_OK
+    assert capsys.readouterr().out == "two\n"
 
 
 def test_wait_times_out_naming_the_script(live, capsys):

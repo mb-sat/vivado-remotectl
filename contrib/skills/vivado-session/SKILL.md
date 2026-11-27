@@ -220,7 +220,9 @@ vrc wait work > /tmp/vrc-timing/wns.txt      # 0 ok, 1 Tcl error, 6 cancelled
 
 The session keeps the reply to its last request on disk, so the same `vrc wait
 work` recovers a result whose client died, timed out or was interrupted. `vrc
-result work` prints it without waiting. `--detach` refuses a busy session.
+result work` prints it without waiting. A busy session serves requests in the order clients
+connected, so `--detach` on one queues the script behind what is running, and
+`vrc wait` then returns the last one queued.
 
 ## Cancel a run that is going nowhere
 

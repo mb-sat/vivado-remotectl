@@ -43,7 +43,14 @@ state. A request stopped by `vrc cancel` is an `err` whose first line is
 connection straight after sending this.
 
 Connections are persistent and requests may be pipelined. The server answers
-in order, one at a time.
+one request at a time, in order: requests are served in the order their
+connections were accepted, and on one connection in the order sent. Accept
+order is the order the clients connected. A connection that has not sent a
+complete frame yet does not hold up later ones; the earliest connection with
+a complete frame goes first. The order holds while a script is running, so a
+client that connects behind it runs after it, and after every client that
+connected before it. A request whose client has closed its socket still runs
+in its turn, and its reply is dropped.
 
 ## Counting bytes, not characters
 
