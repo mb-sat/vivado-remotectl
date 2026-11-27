@@ -292,7 +292,9 @@ def pid_alive(pid: int) -> bool:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             data = fh.read()
     except OSError:
-        return True  # no procfs, or it exited just now; trust kill(0)
+        # Reaped between the kill(0) and the read: gone. Only without a
+        # procfs at all is kill(0) the best answer there is.
+        return not os.path.exists("/proc/self/stat")
     # "<pid> (comm) <state> ..."; comm can contain spaces and parentheses,
     # so anchor on the last ')'.
     idx = data.rfind(b")")
