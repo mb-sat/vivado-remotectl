@@ -235,6 +235,11 @@ vrc log dut           # last 40 lines
 vrc log dut -f        # follow it
 ```
 
+Each `vrc start` (and so `vrc restart`) moves an existing `dut.log` to
+`dut.log.1`, replacing an older one, and begins a new `dut.log`. `vrc log`
+shows the current file; the one before it stays on disk for a post-mortem of
+the run that died.
+
 `puts` and `report_*` without `-return_string` write to the session log, not to
 the reply. `--log` prints the part of the log written while the request ran,
 then the result, all on stdout:

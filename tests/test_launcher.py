@@ -327,6 +327,59 @@ def test_log_tail_of_a_missing_file_is_empty(tmp_path):
     assert launcher.log_tail(tmp_path / "nope.log") == ""
 
 
+def test_log_tail_reads_only_the_end_of_a_big_file(tmp_path, monkeypatch):
+    path = tmp_path / "big.log"
+    path.write_bytes(b"x" * 300_000 + b"\n" + b"".join(b"line %d\n" % i for i in range(5)))
+    reads = []
+    real_open = open
+
+    class Counting:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.fh.close()
+
+        def read(self, n=-1):
+            reads.append(n)
+            return self.fh.read(n)
+
+        def __getattr__(self, name):
+            return getattr(self.fh, name)
+
+    monkeypatch.setattr(
+        "builtins.open", lambda *a, **k: Counting(real_open(*a, **k))
+    )
+    assert launcher.log_tail(path, 3).splitlines() == ["line 2", "line 3", "line 4"]
+    assert sum(reads) <= 65536
+
+
+def test_log_tail_handles_a_file_shorter_than_asked_and_utf8_at_a_boundary(tmp_path):
+    path = tmp_path / "u.log"
+    path.write_bytes("é".encode() * 70000 + b"\nlast\n")
+    assert launcher.log_tail(path, 2).splitlines()[-1] == "last"
+    assert len(launcher.log_tail(path, 50).splitlines()) == 2
+    path.write_text("a\nb\n")
+    assert launcher.log_tail(path, 20) == "a\nb"
+
+
+def test_start_rotates_the_previous_log(registry_dir, fake_vivado_env):
+    (registry_dir / "rot.log").write_text("first run\n")
+    (registry_dir / "rot.log.1").write_text("older still\n")
+    info = launcher.start_session(
+        "rot", vivado=fake_vivado_env, wait=60.0, directory=registry_dir
+    )
+    try:
+        assert (registry_dir / "rot.log.1").read_text() == "first run\n"
+        assert "first run" not in (registry_dir / "rot.log").read_text()
+        assert "vrc start rot" in (registry_dir / "rot.log").read_text()
+    finally:
+        launcher.stop_session(info, force=True)
+
+
 # -- never signal a process we did not start ---------------------------------
 
 
@@ -473,6 +526,7 @@ def test_restart_kills_a_running_command(started):
     new, was = launcher.restart_session(started)
     try:
         assert was == "busy"
+        assert (started.log_path.with_name("unit.log.1")).exists()
         # Killed at once, not left to the 20 s graceful exit.
         assert time.monotonic() - t0 < 15
         assert registry.probe(new) == registry.IDLE

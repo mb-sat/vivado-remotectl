@@ -140,11 +140,36 @@ def child_env(
 
 
 def log_tail(path: Path, lines: int = 20) -> str:
+    """The last ``lines`` lines of a file, read from its end.
+
+    A session log can run to gigabytes, so only as many blocks as hold
+    the lines asked for are read.
+    """
+    if lines <= 0:
+        return ""
+    block = 65536
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        with open(path, "rb") as fh:
+            pos = fh.seek(0, os.SEEK_END)
+            data = b""
+            while pos > 0 and data.count(b"\n") <= lines:
+                step = min(block, pos)
+                pos -= step
+                fh.seek(pos)
+                data = fh.read(step) + data
     except OSError:
         return ""
-    return "\n".join(content.splitlines()[-lines:])
+    text = data.decode("utf-8", errors="replace")
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def rotate_log(log_path: Path) -> None:
+    """Keep the previous run's log as ``<name>.log.1`` and start a new file.
+
+    One generation only: an older ``.log.1`` is replaced.
+    """
+    if log_path.exists():
+        os.replace(log_path, log_path.with_name(log_path.name + ".1"))
 
 
 @dataclass
@@ -265,6 +290,7 @@ def start_session(
         ),
     )
 
+    rotate_log(log_path)
     with open(log_path, "ab") as log, open(os.devnull, "rb") as devnull:
         log.write(
             f"\n=== vrc start {name} at {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
