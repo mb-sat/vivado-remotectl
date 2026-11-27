@@ -51,13 +51,15 @@ SUBCOMMANDS = (
 )
 
 USAGE = """\
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
-    [-- ARG...]
+vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--log]
+    [--detach] [-- ARG...]
 
   Evaluate Tcl in a running Vivado session and print the result.
   -e and -f may both be repeated; they are concatenated in argument order.
   -f - reads from stdin. Anything after -- is the script's $::argv.
   --detach returns once the script has started; collect its result with vrc wait.
+  --log prints what the script wrote to the session log (puts, report_*)
+  before the result.
 
 Subcommands (must come first):
 
@@ -190,6 +192,7 @@ def build_eval_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--tail", action="store_true", default=None)
     p.add_argument("--no-tail", dest="tail", action="store_false")
+    p.add_argument("--log", action="store_true")
     p.add_argument("--detach", action="store_true")
     return p
 
@@ -202,6 +205,44 @@ def open_session(session: str | None, port: int | None) -> Session:
         )
         return Session(info)
     return Session(registry.resolve(session))
+
+
+def log_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def log_slice(path: Path, start: int, settle: float = 0.05, cap: float = 1.0) -> str:
+    """What was appended to the log from byte ``start``, once it stops growing.
+
+    Vivado writes the log from its own buffers, so output of the request can
+    land a moment after the reply. Waits until two reads ``settle`` seconds
+    apart see the same size, for at most ``cap`` seconds.
+    """
+    deadline = time.monotonic() + cap
+    size = log_size(path)
+    while time.monotonic() < deadline:
+        time.sleep(settle)
+        again = log_size(path)
+        if again == size:
+            break
+        size = again
+    if size <= start:
+        return ""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            return fh.read(size - start).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _print_log_slice(text: str) -> None:
+    if text:
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
+        sys.stdout.flush()
 
 
 #: The plugin starts the error text of a request `vrc cancel` stopped with this.
@@ -289,6 +330,10 @@ def cmd_eval(argv: list[str]) -> int:
     except RegistryError as exc:
         return die(str(exc), EXIT_NO_SESSION)
 
+    if args.log and args.detach:
+        return die("--log cannot be combined with --detach; the output is "
+                   "read when the reply arrives (vrc log NAME afterwards)")
+
     if args.detach:
         if args.port is not None:
             return die("--detach needs a named session, not --port")
@@ -303,6 +348,7 @@ def cmd_eval(argv: list[str]) -> int:
     except ConnectFailed as exc:
         return die(str(exc), EXIT_NO_SESSION)
 
+    log_start = log_size(client.info.log_path) if args.log else 0
     tailer = (
         LogTailer(client.info.log_path)
         if tail and client.info.log_path.exists()
@@ -315,6 +361,8 @@ def cmd_eval(argv: list[str]) -> int:
         else:
             result = client.run(script, timeout=timeout)
     except RemoteTclError as exc:
+        if args.log:
+            _print_log_slice(log_slice(client.info.log_path, log_start))
         print(exc.errorinfo, file=sys.stderr)
         if exc.errorinfo.startswith(CANCELLED_PREFIX):
             return EXIT_CANCELLED
@@ -340,6 +388,8 @@ def cmd_eval(argv: list[str]) -> int:
     finally:
         client.close()
 
+    if args.log:
+        _print_log_slice(log_slice(client.info.log_path, log_start))
     if result:
         print(result)
     return EXIT_OK

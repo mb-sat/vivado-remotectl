@@ -229,6 +229,20 @@ vrc log dut           # last 40 lines
 vrc log dut -f        # follow it
 ```
 
+`puts` and `report_*` without `-return_string` write to the session log, not to
+the reply. `--log` prints the part of the log written while the request ran,
+then the result, all on stdout:
+
+```sh
+vrc -f report.tcl --log | rg 'RESULT|WNS'
+```
+
+It shows what Vivado had written to the log by the time the reply arrived:
+`vrc` waits until the log has stopped growing for 50 ms, for at most a second,
+so output written later still appears only in `vrc log`. `--log` cannot be
+combined with `--detach`. With `--tail` the live copy goes to stderr and the
+slice to stdout, so a redirect keeps just the slice and the result.
+
 Ctrl-C detaches `vrc` and leaves the script running: `vrc` reports which
 session is still working and exits 130. Passing `--timeout` behaves the same
 way and exits 4. To stop the script itself, use `vrc cancel`, described in the
@@ -447,8 +461,8 @@ the whole loop, and has the rest of the keys and settings.
 ## Commands
 
 ```
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
-    [-- ARG...]
+vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--log]
+    [--detach] [-- ARG...]
 
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N
                                       --min-free GB --idle-stop DUR

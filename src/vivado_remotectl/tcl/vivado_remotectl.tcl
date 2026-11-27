@@ -544,6 +544,9 @@ proc ::vrc::_exec {chan script} {
     # Record before answering, so a client that reads the result file as
     # soon as its reply arrives never sees the previous one.
     if {$record} { ::vrc::_record_end $started $status $detail }
+    # stdout is a file under `vrc start`, so it is block buffered; a client
+    # that asked for the log slice (--log) reads it right after the reply.
+    catch {flush stdout}
     ::vrc::_respond $chan $status $detail
     after idle ::vrc::_pump
 }

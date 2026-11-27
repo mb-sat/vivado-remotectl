@@ -561,3 +561,55 @@ def test_dashdash_with_no_arguments_empties_argv(live, capsys):
     capsys.readouterr()
     assert main(["-e", "llength $::argv", "--"]) == EXIT_OK
     assert capsys.readouterr().out.strip() == "0"
+
+
+# -- --log -------------------------------------------------------------------
+
+
+def test_log_prints_what_the_script_wrote_before_the_result(live, capsys):
+    assert main(["-e", "puts RESULT-LINE; expr 6*7", "--log"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert out == "RESULT-LINE\n42\n"
+
+
+def test_log_leaves_out_earlier_output(live, capsys):
+    assert main(["-e", "puts first; expr 1", "--log"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["-e", "puts second; expr 2", "--log"]) == EXIT_OK
+    assert capsys.readouterr().out == "second\n2\n"
+
+
+def test_log_with_an_error_still_prints_the_slice(live, capsys):
+    assert main(["-e", "puts before; error boom", "--log"]) == EXIT_TCL_ERROR
+    out = capsys.readouterr()
+    assert out.out == "before\n"
+    assert "boom" in out.err
+
+
+def test_log_with_tail_keeps_stdout_to_the_slice_and_result(live, capsys):
+    assert main(["-e", "puts hello; expr 5", "--log", "--tail"]) == EXIT_OK
+    assert capsys.readouterr().out == "hello\n5\n"
+
+
+def test_log_is_refused_with_detach(live, capsys):
+    assert main(["-e", "expr 1", "--log", "--detach"]) == EXIT_USAGE
+    assert "--detach" in capsys.readouterr().err
+
+
+def test_log_slice_waits_for_the_log_to_stop_growing(tmp_path):
+    import threading
+
+    from vivado_remotectl.cli import log_slice
+
+    path = tmp_path / "x.log"
+    path.write_text("old\n")
+
+    def late():
+        time.sleep(0.02)
+        with open(path, "a") as fh:
+            fh.write("late\n")
+
+    t = threading.Thread(target=late)
+    t.start()
+    assert log_slice(path, 4) == "late\n"
+    t.join()
