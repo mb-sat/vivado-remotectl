@@ -546,3 +546,45 @@ def test_start_command_round_trips_the_options():
         "vrc start w0 --vivado /opt/v/vivado --cwd '/w d' --port 4000 "
         "--idle-stop 7200s --arg=-tclargs '--arg=a b'"
     )
+
+
+def _busy(info, seconds=60):
+    """Hand the session a long command and wait until it cannot answer."""
+    with Session(info) as client:
+        client.send(f"after {seconds * 1000}")
+    deadline = time.monotonic() + 10
+    while registry.probe(info) != registry.BUSY:
+        assert time.monotonic() < deadline, "session never went busy"
+        time.sleep(0.05)
+
+
+def test_stop_kills_a_busy_session_at_once(registry_dir, fake_vivado_env):
+    info = launcher.start_session(
+        "busy", vivado=fake_vivado_env, wait=60.0, directory=registry_dir
+    )
+    _busy(info)
+    began = time.monotonic()
+    outcome = launcher.stop_session(info, timeout=30.0)
+    assert time.monotonic() - began < 10
+    assert outcome == "killed, its running command lost"
+    assert not registry.pid_alive(info.pid)
+    assert not (registry_dir / "busy.session").exists()
+
+
+def test_stop_leaves_a_busy_session_it_cannot_verify(registry_dir, fake_vivado_env, monkeypatch):
+    info = launcher.start_session(
+        "unverified", vivado=fake_vivado_env, wait=60.0, directory=registry_dir
+    )
+    try:
+        _busy(info, seconds=3)
+        sent = []
+        monkeypatch.setattr(launcher, "_terminate", lambda *a, **k: sent.append(a))
+        # Recorded start time that is not the process's: nothing may be signalled.
+        stranger = registry.SessionInfo(**{**info.__dict__, "starttime": "1"})
+        outcome = launcher.stop_session(stranger, timeout=0.5)
+        assert "killed" not in outcome
+        assert sent == []
+        assert registry.pid_alive(info.pid)
+    finally:
+        monkeypatch.undo()
+        launcher.stop_session(info, force=True)

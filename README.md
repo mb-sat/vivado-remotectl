@@ -118,6 +118,12 @@ vrc stop --mine   # every session you started
 vrc stop --all    # every session, but see below
 ```
 
+An idle session is asked to exit. A busy one cannot answer until its command
+ends, so `vrc stop` checks first and kills a busy session at once instead of
+waiting out `--timeout`; it prints `killed, its running command lost`. That
+needs the recorded pid to be provably the session's process; otherwise the
+exit request and the wait happen as for an idle one.
+
 `OWNER` is who ran `vrc start`: the Claude Code session, as `claude:<id>`
 (its subagents share the id), or otherwise `user:<name>`; `$VRC_OWNER`
 overrides both. `--mine` and `vrc list --mine` select by it. `--all` stops

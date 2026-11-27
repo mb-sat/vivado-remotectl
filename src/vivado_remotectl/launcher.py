@@ -387,8 +387,19 @@ def _terminate(pid: int, expect_starttime: str, grace: float = 5.0) -> None:
 def stop_session(
     info: SessionInfo, *, timeout: float = 20.0, force: bool = False
 ) -> str:
-    """Shut a session down. Returns a one-word outcome for the caller to print."""
+    """Shut a session down. Returns a short outcome for the caller to print.
+
+    An idle session is asked to exit and given ``timeout`` to do so. A busy
+    one cannot answer `exit` until its command ends, so waiting would only
+    delay the kill by the timeout, twice over; one that is provably ours is
+    killed at once and the outcome says its command was lost. A busy session
+    whose pid cannot be verified takes the graceful path as before.
+    """
     outcome = "stopped"
+    was_busy = False
+
+    if not force and probe(info, timeout=1.0) == "busy" and owns_pid(info):
+        force = was_busy = True
 
     if not force:
         try:
@@ -410,7 +421,7 @@ def stop_session(
 
     if owns_pid(info):
         _terminate(info.pid, info.starttime)
-        outcome = "killed"
+        outcome = "killed, its running command lost" if was_busy else "killed"
     elif pid_alive(info.pid) and not info.starttime:
         # Pre-starttime descriptor, or one we cannot verify. Refuse to signal
         # rather than risk hitting an unrelated Vivado that reused the pid.
