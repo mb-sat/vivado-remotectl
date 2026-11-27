@@ -613,3 +613,48 @@ def test_log_slice_waits_for_the_log_to_stop_growing(tmp_path):
     t.start()
     assert log_slice(path, 4) == "late\n"
     t.join()
+
+
+# -- why a session died ------------------------------------------------------
+
+
+def test_exit_five_names_the_oom_killer(live, capsys, monkeypatch):
+    from vivado_remotectl import procinfo
+
+    monkeypatch.setattr(
+        procinfo, "oom_kill", lambda pid, *a, **k: procinfo.OomKill(pid, 12 * 2**30)
+    )
+    assert main(["-e", "exit"]) == EXIT_DIED
+    err = capsys.readouterr().err
+    assert "killed by the kernel OOM killer (anon-rss 12.0G)" in err
+
+
+def test_exit_five_without_an_oom_record_is_as_before(live, capsys, monkeypatch):
+    from vivado_remotectl import procinfo
+
+    monkeypatch.setattr(procinfo, "oom_kill", lambda *a, **k: None)
+    assert main(["-e", "exit"]) == EXIT_DIED
+    err = capsys.readouterr().err
+    assert "closed the connection" in err and "OOM" not in err
+
+
+def test_cancel_that_ends_in_death_names_the_oom_killer(live, capsys, monkeypatch):
+    from vivado_remotectl import cli, procinfo
+
+    monkeypatch.setattr(cli, "cancel_session", lambda info, wait: "died")
+    monkeypatch.setattr(
+        procinfo, "oom_kill", lambda pid, *a, **k: procinfo.OomKill(pid, None)
+    )
+    assert main(["cancel", "cli"]) == EXIT_DIED
+    assert "OOM killer" in capsys.readouterr().err
+
+
+def test_list_does_not_read_the_kernel_log(live, capsys, monkeypatch):
+    from vivado_remotectl import procinfo
+
+    def boom(*a, **k):
+        raise AssertionError("list asked the kernel log")
+
+    monkeypatch.setattr(procinfo, "oom_kill", boom)
+    monkeypatch.setattr(procinfo, "_kernel_log", boom)
+    assert main(["list"]) == EXIT_OK

@@ -62,3 +62,61 @@ def test_fmt_bytes():
     assert procinfo.fmt_bytes(None) == "-"
     assert procinfo.fmt_bytes(5 * 2**30 + 2**29) == "5.5G"
     assert procinfo.fmt_bytes(300 * 2**20) == "300M"
+
+
+OOM_LINE = (
+    "Out of memory: Killed process 1105540 (vivado) total-vm:20123456kB, "
+    "anon-rss:13438504kB, file-rss:1234kB, shmem-rss:0kB, UID:1000 "
+    "pgtables:30000kB oom_score_adj:0"
+)
+
+
+def test_oom_line_gives_the_anon_rss_of_that_pid():
+    found = procinfo.parse_oom_line(OOM_LINE, 1105540)
+    assert found == procinfo.OomKill(1105540, 13438504 * 1024)
+
+
+def test_oom_line_of_another_pid_is_ignored():
+    assert procinfo.parse_oom_line(OOM_LINE, 1105541) is None
+    assert procinfo.parse_oom_line(OOM_LINE, 110554) is None
+    assert procinfo.parse_oom_line("usb 1-1: new device", 1105540) is None
+
+
+def test_oom_line_without_rss_still_matches():
+    found = procinfo.parse_oom_line("Killed process 7 (vivado) total-vm:1kB", 7)
+    assert found == procinfo.OomKill(7, None)
+
+
+def test_oom_kill_finds_the_line_in_the_kernel_log(monkeypatch):
+    monkeypatch.setattr(
+        procinfo, "_kernel_log", lambda since, timeout: "noise\n" + OOM_LINE + "\n"
+    )
+    assert procinfo.oom_kill(1105540).anon_rss == 13438504 * 1024
+    assert procinfo.oom_kill(42) is None
+
+
+def test_oom_kill_with_no_readable_log_says_nothing(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise PermissionError("no")
+
+    monkeypatch.setattr(procinfo.subprocess, "run", refuse)
+    assert procinfo.oom_kill(1105540) is None
+
+
+def test_kernel_log_falls_back_to_dmesg(monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd[0])
+        if cmd[0] == "journalctl":
+            raise FileNotFoundError(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0, stdout=OOM_LINE + "\n", stderr="")
+
+    monkeypatch.setattr(procinfo.subprocess, "run", run)
+    assert procinfo.oom_kill(1105540) is not None
+    assert calls == ["journalctl", "dmesg"]
+
+
+def test_oom_kill_ignores_pid_zero(monkeypatch):
+    monkeypatch.setattr(procinfo, "_kernel_log", lambda *a: OOM_LINE)
+    assert procinfo.oom_kill(0) is None

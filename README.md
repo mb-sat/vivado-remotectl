@@ -371,7 +371,11 @@ Exit codes are distinct so a script can branch on them:
 | 130 | interrupted; the script is still running |
 
 Exit 5 usually means Vivado died, so `vrc` prints the tail of the session log
-with it. `vrc -e exit` also produces it, because the process closes the socket
+with it. It also reads the kernel log (`journalctl -k`, else `dmesg`) for a
+`Killed process <pid>` line from the last ten minutes and, if it finds one,
+says the session was killed by the OOM killer and how much memory it held.
+Where the kernel log cannot be read, that line is left out. `vrc cancel` does
+the same when the session dies under it. `vrc -e exit` also produces it, because the process closes the socket
 instead of replying — use `vrc stop` instead.
 
 A session that is mid-synthesis cannot answer anything at all: Vivado's Tcl

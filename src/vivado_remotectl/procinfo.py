@@ -9,6 +9,9 @@ start`. Linux only, like the rest of the pid handling.
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import time
 from dataclasses import dataclass
 
 #: argv[0] of the real Vivado process. The `bin/vivado` and `bin/loader`
@@ -137,3 +140,58 @@ def fmt_bytes(n: int | None) -> str:
     if gib >= 1:
         return f"{gib:.1f}G"
     return f"{n / 2**20:.0f}M"
+
+
+@dataclass
+class OomKill:
+    """The kernel's record of the OOM killer ending a process."""
+
+    pid: int
+    anon_rss: int | None  # bytes
+
+
+_OOM_LINE = re.compile(r"Killed process (\d+) \(")
+_ANON_RSS = re.compile(r"anon-rss:(\d+)kB")
+
+
+def parse_oom_line(line: str, pid: int) -> OomKill | None:
+    """Read ``Killed process <pid> (name) ... anon-rss:<n>kB`` for this pid."""
+    m = _OOM_LINE.search(line)
+    if m is None or int(m.group(1)) != pid:
+        return None
+    rss = _ANON_RSS.search(line)
+    return OomKill(pid, int(rss.group(1)) * 1024 if rss else None)
+
+
+def _kernel_log(since_seconds: int, timeout: float) -> str:
+    """The kernel log of the last few minutes, or "" if it cannot be read."""
+    since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - since_seconds))
+    for cmd in (
+        ["journalctl", "-k", "-o", "cat", "--no-pager", "--since", since],
+        ["dmesg"],
+    ):
+        try:
+            done = subprocess.run(
+                cmd, capture_output=True, text=True, errors="replace",
+                timeout=timeout, stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode == 0 and done.stdout:
+            return done.stdout
+    return ""
+
+
+def oom_kill(pid: int, since_seconds: int = 600, timeout: float = 3.0) -> OomKill | None:
+    """Did the kernel OOM killer end ``pid`` in the last ``since_seconds``?
+
+    Best effort: the kernel log may be unreadable (no journal access,
+    ``dmesg_restrict``, a sandbox), and then the answer is None, not an error.
+    """
+    if pid <= 0:
+        return None
+    for line in _kernel_log(since_seconds, timeout).splitlines():
+        found = parse_oom_line(line, pid)
+        if found is not None:
+            return found
+    return None

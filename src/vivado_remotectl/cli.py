@@ -498,9 +498,24 @@ def _print_result(info: registry.SessionInfo) -> int:
     return EXIT_TCL_ERROR
 
 
+def _oom_note(info: registry.SessionInfo) -> str:
+    """", killed by the OOM killer (anon-rss 12.8G)" when the kernel log says so."""
+    try:
+        found = procinfo.oom_kill(info.pid)
+    except Exception:
+        return ""
+    if found is None:
+        return ""
+    rss = f" (anon-rss {procinfo.fmt_bytes(found.anon_rss)})" if found.anon_rss else ""
+    return f"killed by the kernel OOM killer{rss}"
+
+
 def _session_died(info: registry.SessionInfo, what: str = "closed the connection") -> int:
     tail_text = log_tail(info.log_path)
     msg = f"session '{info.name}' {what}"
+    oom = _oom_note(info)
+    if oom:
+        msg = f"session '{info.name}' was {oom}; the machine ran out of memory"
     if tail_text:
         msg += f"\n--- last lines of {info.log_path} ---\n{tail_text}"
     return die(msg, EXIT_DIED)
@@ -776,6 +791,9 @@ def cmd_cancel(argv: list[str]) -> int:
     if outcome == "died":
         tail_text = log_tail(info.log_path)
         msg = f"{info.name}: Vivado exited while cancelling; vrc start it again"
+        oom = _oom_note(info)
+        if oom:
+            msg = f"{info.name}: {oom} while cancelling; vrc start it again"
         if tail_text:
             msg += f"\n--- last lines of {info.log_path} ---\n{tail_text}"
         return die(msg, EXIT_DIED)
