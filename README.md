@@ -471,7 +471,7 @@ the whole loop, and has the rest of the keys and settings.
 ## Commands
 
 ```
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--log]
+vrc [-s NAME] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--log]
     [--detach] [-- ARG...]
 
 vrc start [NAME]   launch a session   --vivado PATH --version VER --port N

@@ -51,7 +51,7 @@ SUBCOMMANDS = (
 )
 
 USAGE = """\
-vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--log]
+vrc [-s NAME] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--log]
     [--detach] [-- ARG...]
 
   Evaluate Tcl in a running Vivado session and print the result.
@@ -186,7 +186,6 @@ def build_eval_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-h", "--help", action="store_true")
     p.add_argument("-s", "--session", metavar="NAME")
-    p.add_argument("-p", "--port", type=int, metavar="PORT")
     p.add_argument("-e", "--eval", action=_ScriptPart, metavar="SCRIPT")
     p.add_argument("-f", "--file", action=_ScriptPart, metavar="FILE")
     p.add_argument(
@@ -200,13 +199,8 @@ def build_eval_parser() -> argparse.ArgumentParser:
     return p
 
 
-def open_session(session: str | None, port: int | None) -> Session:
-    """Resolve a session by name, or build an ad-hoc one from --port."""
-    if port is not None:
-        info = registry.SessionInfo(
-            name=f"port-{port}", host="127.0.0.1", port=port, pid=0, token=""
-        )
-        return Session(info)
+def open_session(session: str | None) -> Session:
+    """Resolve a session by name, $VIVADO_REMOTECTL_SESSION or the only one."""
     return Session(registry.resolve(session))
 
 
@@ -267,6 +261,11 @@ def _explain_leftovers(leftover: list[str]) -> str:
     """Say what was probably meant by arguments the eval parser did not take."""
     first = leftover[0]
     option = first.split("=", 1)[0]
+    if option in ("-p", "--port") or (first.startswith("-p") and first[2:].isdigit()):
+        return (
+            "-p was removed: a session is reached through its descriptor, "
+            "which holds the token a bare port lacks; choose it with -s NAME"
+        )
     if option in START_OPTIONS:
         hint = f"{option} is an option of 'vrc start', not of evaluating Tcl"
         if option == "--cwd":
@@ -288,7 +287,7 @@ def _shell_quote(text: str) -> str:
 
 
 #: Eval options that take a value, so a `--` after one is that value.
-_VALUE_OPTIONS = ("-s", "--session", "-p", "--port", "-e", "--eval", "-f", "--file", "--timeout")
+_VALUE_OPTIONS = ("-s", "--session", "-e", "--eval", "-f", "--file", "--timeout")
 
 
 def split_script_args(argv: list[str]) -> tuple[list[str], list[str] | None]:
@@ -329,7 +328,7 @@ def cmd_eval(argv: list[str]) -> int:
     timeout = args.timeout if args.timeout else None  # 0 means forever
 
     try:
-        client = open_session(args.session, args.port)
+        client = open_session(args.session)
     except RegistryError as exc:
         return die(str(exc), EXIT_NO_SESSION)
 
@@ -338,13 +337,11 @@ def cmd_eval(argv: list[str]) -> int:
                    "read when the reply arrives (vrc log NAME afterwards)")
 
     if args.detach:
-        if args.port is not None:
-            return die("--detach needs a named session, not --port")
         return _detach(client.info, script)
 
     tail = args.tail
     if tail is None:
-        tail = sys.stderr.isatty() and args.port is None
+        tail = sys.stderr.isatty()
 
     try:
         client.connect()

@@ -109,9 +109,12 @@ def test_named_session_that_does_not_exist(registry_dir, capsys):
     assert "no session named" in capsys.readouterr().err
 
 
-def test_port_that_nothing_listens_on(registry_dir, capsys):
-    assert main(["-p", "1", "-e", "expr 1"]) == EXIT_NO_SESSION
-    assert "cannot reach" in capsys.readouterr().err
+def test_p_is_gone_and_says_to_use_s(registry_dir, capsys):
+    for argv in (["-p", "1", "-e", "expr 1"], ["-e", "expr 1", "--port", "1"],
+                 ["-p1", "-e", "expr 1"]):
+        assert main(argv) == EXIT_USAGE
+        err = capsys.readouterr().err
+        assert "-p was removed" in err and "-s NAME" in err
 
 
 # -- against a live session --------------------------------------------------
@@ -166,13 +169,6 @@ def test_a_cancelled_request_exits_six(live, registry_dir, capsys):
 def test_cancel_with_nothing_running(live, capsys):
     assert main(["cancel", "cli"]) == EXIT_OK
     assert capsys.readouterr().out == "cli: nothing running\n"
-
-
-def test_explicit_port_bypasses_the_registry(live, capsys):
-    # No token is available this way, so the server must refuse it. That is
-    # the documented trade-off of -p, not a silent failure.
-    assert main(["-p", str(live.port), "-e", "expr 1"]) == EXIT_DIED
-    assert "authentication" in capsys.readouterr().err
 
 
 def test_ping_reports_the_version(live, capsys):
