@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The suite runs the Tcl plugin under the host's tclsh8.6 where no Vivado
+      # is installed. The Tcl 8.5 half (Vivado 2023.2 and older) needs tclsh8.5,
+      # which Ubuntu no longer packages, so it is skipped here and runs only on
+      # a machine with a Vivado install.
+      - run: sudo apt-get update && sudo apt-get install -y tcl8.6
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: pytest -q

@@ -200,7 +200,6 @@ def test_cancel_an_idle_session_sends_nothing(started):
 
 
 def test_cancel_refuses_a_session_without_the_prompt_loop(registry_dir):
-    import os
 
     info = registry.SessionInfo(
         name="gui", host="127.0.0.1", port=1, pid=os.getpid(), token="a" * 32,
@@ -322,7 +321,6 @@ def test_signal_target_uses_the_group_only_for_a_group_leader():
 
 
 def test_signal_target_refuses_an_unverifiable_descriptor():
-    import os
 
     assert launcher._signal_target(os.getpid(), "") is None
 

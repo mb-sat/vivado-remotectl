@@ -1,0 +1,9 @@
+test:
+  image: python:3.12
+  before_script:
+    # The Tcl 8.5 half of the suite is skipped here: no tclsh8.5 is packaged.
+    - apt-get update && apt-get install -y tcl8.6
+    - pip install -e '.[dev]'
+  script:
+    - ruff check .
+    - pytest -q

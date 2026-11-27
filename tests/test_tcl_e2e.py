@@ -176,7 +176,7 @@ def test_server_survives_garbage(tcl_session):
         sock.settimeout(5)
         try:
             sock.recv(4096)
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             pass
     finally:
         sock.close()

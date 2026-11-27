@@ -87,7 +87,7 @@ class Session:
         try:
             self._sock.sendall(encode_request(script, self.info.token))
             status, text = read_response(self._reader)
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             # The script is still running inside Vivado; the connection is no
             # longer in a known state, so do not reuse it.
             self.close()

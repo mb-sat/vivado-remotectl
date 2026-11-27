@@ -14,7 +14,6 @@ import argparse
 import json
 import os
 import signal
-import socket
 import sys
 import threading
 import time
@@ -57,8 +56,8 @@ vrc [-s NAME] [-p PORT] -e SCRIPT | -f FILE  [--timeout SEC] [--tail] [--detach]
 
   Evaluate Tcl in a running Vivado session and print the result.
   -e and -f may both be repeated; they are concatenated in argument order.
-  -f - reads from stdin. Anything after -- is the script's $::argv. --detach returns once the script has started;
-  collect its result with vrc wait.
+  -f - reads from stdin. Anything after -- is the script's $::argv.
+  --detach returns once the script has started; collect its result with vrc wait.
 
 Subcommands (must come first):
 
@@ -105,7 +104,7 @@ class _ScriptPart(argparse.Action):
         parts = getattr(namespace, "script_parts", None)
         if parts is None:
             parts = []
-            setattr(namespace, "script_parts", parts)
+            namespace.script_parts = parts
         parts.append((kind, values))
 
 
@@ -139,7 +138,7 @@ class LogTailer:
 
     def __enter__(self) -> LogTailer:
         try:
-            self._fh = open(self.path, "r", encoding="utf-8", errors="replace")
+            self._fh = open(self.path, encoding="utf-8", errors="replace")
         except OSError:
             return self
         self._fh.seek(0, os.SEEK_END)
@@ -320,7 +319,7 @@ def cmd_eval(argv: list[str]) -> int:
         if exc.errorinfo.startswith(CANCELLED_PREFIX):
             return EXIT_CANCELLED
         return EXIT_TCL_ERROR
-    except (socket.timeout, TimeoutError):
+    except TimeoutError:
         return die(
             f"timed out after {timeout:g}s; the script is still running in "
             f"session '{client.info.name}' ({_still_running_hint(client.info)})",
@@ -481,7 +480,7 @@ def cmd_wait(argv: list[str]) -> int:
         client.run("expr 1", timeout=args.timeout or None)
     except ConnectFailed as exc:
         return die(str(exc), EXIT_NO_SESSION)
-    except (socket.timeout, TimeoutError):
+    except TimeoutError:
         running = registry.read_running(info)
         what = f" ({running.first_line})" if running else ""
         return die(
@@ -614,7 +613,7 @@ def _memory_refusal(name: str, min_free_gb: float) -> str | None:
     )
     if held:
         msg += f"; Vivados holding memory: {', '.join(held)}"
-    return msg + f". Stop one, or pass --min-free 0 to start anyway"
+    return msg + ". Stop one, or pass --min-free 0 to start anyway"
 
 
 def cmd_stop(argv: list[str]) -> int:
@@ -957,7 +956,7 @@ def cmd_ping(argv: list[str]) -> int:
         version = "(not Vivado)"
     except (ConnectFailed, SessionDied, OSError) as exc:
         return die(str(exc), EXIT_NO_SESSION)
-    except (socket.timeout, TimeoutError):
+    except TimeoutError:
         return die(f"'{info.name}' is busy (no answer in {args.timeout:g}s)", EXIT_TIMEOUT)
 
     elapsed = (time.monotonic() - started) * 1000

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import errno
 import os
-import shutil
 import re
+import shutil
 import socket
 import time
 from dataclasses import dataclass
@@ -347,7 +347,7 @@ def probe(info: SessionInfo, timeout: float = 0.5) -> str:
         sock.sendall(encode_request("expr 1", info.token))
         read_response(FrameReader(sock))
         return IDLE
-    except (socket.timeout, TimeoutError):
+    except TimeoutError:
         return BUSY
     except Exception:
         return DEAD if not pid_alive(info.pid) else BUSY
