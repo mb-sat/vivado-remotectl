@@ -1130,7 +1130,7 @@ _SUBCOMMAND_VALUE_OPTIONS = {
 }
 
 #: Subcommands that take no session, and so ignore a leading -s.
-_NO_SESSION_SUBCOMMANDS = ("list", "status", "plugin-path")
+_NO_SESSION_SUBCOMMANDS = ("list", "status", "plugin-path", "pool")
 
 
 def _positional(command: str, args: list[str]) -> str | None:

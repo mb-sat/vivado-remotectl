@@ -20,7 +20,6 @@ import os
 import re
 import shlex
 import signal
-import socket
 import sys
 import threading
 import time
@@ -431,7 +430,7 @@ class Pool:
                 self._finish(job, "cancelled", exc.errorinfo, "the pool was interrupted")
             else:
                 self._finish(job, "error", exc.errorinfo, str(exc))
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             self._finish(job, "timeout", detail=f"no result within {self.timeout:g}s")
             self._count(worker)
             self._after_timeout(worker)
@@ -476,7 +475,7 @@ class Pool:
             return True
         except RemoteTclError as exc:
             why = exc.errorinfo
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             why = f"no result within {self.timeout:g}s"
         except (ConnectFailed, SessionDied, ProtocolError, OSError) as exc:
             why = str(exc) or type(exc).__name__
