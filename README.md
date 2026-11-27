@@ -492,7 +492,11 @@ vrc pool status DIR  a pool's jobs    --json
 vrc --version      version of vrc
 ```
 
-A subcommand must be the first argument. Anything after it that `vrc` does not
+A subcommand must be the first argument, with one exception: `-s NAME` (or
+`--session NAME`) may stand before it, so `vrc -s dut info` is `vrc info dut`
+and `vrc -s dut log -f` follows `dut`. If the subcommand also names a session
+and it differs, that is an error. `list`, `status` and `plugin-path` take no
+session and ignore it; `vrc -s dut start` starts `dut`. Anything after it that `vrc` does not
 take is an error that says what was probably meant: Tcl given without `-e`
 comes back as the quoted `vrc -e '...'` to run instead, and a `vrc start`
 option on an eval is named as one. Evaluating Tcl is spelled `-e` rather than

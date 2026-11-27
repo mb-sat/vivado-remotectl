@@ -658,3 +658,59 @@ def test_list_does_not_read_the_kernel_log(live, capsys, monkeypatch):
     monkeypatch.setattr(procinfo, "oom_kill", boom)
     monkeypatch.setattr(procinfo, "_kernel_log", boom)
     assert main(["list"]) == EXIT_OK
+
+
+# -- -s in front of a subcommand ---------------------------------------------
+
+
+def test_s_before_a_subcommand_names_the_session(live, capsys):
+    assert main(["-s", "cli", "info"]) == EXIT_OK
+    assert "cli" in capsys.readouterr().out
+    assert main(["--session", "cli", "ping"]) == EXIT_OK
+    assert main(["-e", "expr 3"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["--session=cli", "wait"]) == EXIT_OK
+    assert capsys.readouterr().out == "3\n"
+
+
+def test_s_before_a_subcommand_beats_the_only_session_guess(live, capsys):
+    assert main(["-s", "ghost", "info"]) == EXIT_NO_SESSION
+    assert "no session named" in capsys.readouterr().err
+
+
+def test_s_with_the_same_name_given_again_is_fine(live, capsys):
+    assert main(["-s", "cli", "info", "cli"]) == EXIT_OK
+
+
+def test_s_with_a_different_name_is_a_usage_error(live, capsys):
+    assert main(["-s", "cli", "info", "other"]) == EXIT_USAGE
+    assert "differ" in capsys.readouterr().err
+
+
+def test_a_value_after_an_option_is_not_taken_for_the_name(live, capsys):
+    assert main(["-s", "cli", "log", "-n", "5"]) == EXIT_OK
+
+
+def test_s_is_ignored_by_list_and_plugin_path(live, capsys):
+    assert main(["-s", "nobody", "list"]) == EXIT_OK
+    assert "cli" in capsys.readouterr().out
+    assert main(["-s", "nobody", "plugin-path"]) == EXIT_OK
+
+
+def test_s_before_start_starts_that_name(monkeypatch, capsys):
+    from vivado_remotectl import cli
+
+    seen = []
+
+    def fake_start(name, **kwargs):
+        seen.append(name)
+        raise cli.LaunchError("stop here")
+
+    monkeypatch.setattr(cli, "start_session", fake_start)
+    assert main(["-s", "x", "start", "--min-free", "0"]) == EXIT_NO_SESSION
+    assert seen == ["x"]
+
+
+def test_s_before_an_eval_is_unchanged(live, capsys):
+    assert main(["-s", "cli", "-e", "expr 1+1"]) == EXIT_OK
+    assert capsys.readouterr().out == "2\n"

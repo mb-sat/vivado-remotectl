@@ -79,6 +79,9 @@ Subcommands (must come first):
   vrc pool status    show how a pool's jobs stand
   vrc --version      the version of vrc itself
 
+  -s NAME may stand before a subcommand instead of the NAME after it:
+  vrc -s dut info is vrc info dut. list, status and plugin-path ignore it.
+
 Examples:
 
   vrc start dut
@@ -1115,6 +1118,57 @@ HANDLERS = {
 }
 
 
+#: Options that take a value, per subcommand, so a value is not mistaken for
+#: the session name when `-s NAME` in front is checked against it.
+_SUBCOMMAND_VALUE_OPTIONS = {
+    "start": ("--vivado", "--version", "--port", "--cwd", "--wait", "--arg",
+              "--idle-stop", "--min-free"),
+    "stop": ("--timeout",),
+    "restart": ("--wait", "--min-free"),
+    "cancel": ("--wait",),
+    "wait": ("--timeout",),
+    "log": ("-n", "--lines"),
+    "repl": ("--timeout",),
+    "ping": ("--timeout",),
+}
+
+#: Subcommands that take no session, and so ignore a leading -s.
+_NO_SESSION_SUBCOMMANDS = ("list", "status", "plugin-path")
+
+
+def _positional(command: str, args: list[str]) -> str | None:
+    values = _SUBCOMMAND_VALUE_OPTIONS.get(command, ())
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if arg in values:
+            i += 2
+            continue
+        if not arg.startswith("-"):
+            return arg
+        i += 1
+    return None
+
+
+def _leading_session(argv: list[str]) -> tuple[str, list[str]] | None:
+    """Split ``-s NAME`` / ``--session NAME`` / ``--session=NAME`` off the front.
+
+    Returns the name and the rest, only when the rest starts with a
+    subcommand; otherwise the arguments are an eval and are left alone.
+    """
+    if argv[0] in ("-s", "--session") and len(argv) >= 3:
+        name, rest = argv[1], argv[2:]
+    elif argv[0].startswith("--session=") and len(argv) >= 2:
+        name, rest = argv[0].split("=", 1)[1], argv[1:]
+    else:
+        return None
+    if rest[0] not in HANDLERS:
+        return None
+    return name, rest
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -1128,6 +1182,20 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         print(USAGE, end="", file=sys.stderr)
         return EXIT_USAGE
+
+    leading = _leading_session(argv)
+    if leading is not None:
+        name, argv = leading
+        command = argv[0]
+        if command not in _NO_SESSION_SUBCOMMANDS:
+            given = _positional(command, argv[1:])
+            if given is None:
+                argv = [command, name, *argv[1:]]
+            elif given != name:
+                return die(
+                    f"-s {name} and the name {given} given to '{command}' differ; "
+                    f"use one of them"
+                )
 
     if argv[0] in HANDLERS:
         try:
