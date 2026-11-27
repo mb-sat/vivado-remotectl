@@ -1,6 +1,6 @@
 ;;; vrc.el --- Drive a persistent Vivado session from Emacs  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Hannes Klas
+;; Copyright (C) 2026 MBS
 
 ;; SPDX-License-Identifier: MIT
 
