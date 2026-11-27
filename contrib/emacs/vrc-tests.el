@@ -10,7 +10,7 @@
 ;; The evaluation tests need a live session and skip without one.  A fake
 ;; Vivado is enough and costs nothing:
 ;;
-;;   export VRC_TEST_TCLSH=/tools/Xilinx/Vivado/2023.2/bin/unwrapped/lnx64.o/tclsh8.5
+;;   export VRC_TEST_TCLSH=$(command -v tclsh8.6)
 ;;   vrc start emacstest --vivado "$PWD/tests/fake_vivado.sh"
 ;;   VRC_TEST_SESSION=emacstest emacs -Q --batch ...
 

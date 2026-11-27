@@ -203,11 +203,12 @@ previous design's timing.
 ## Run the tests
 
 The evaluation tests need a session, and a fake Vivado is enough — it runs the
-real plugin on Vivado's own `tclsh8.5` (or a 2024 Vivado's `tclsh8.6`), with
-no Vivado process and no hardware.
+real plugin on a `tclsh` you point it at, with no Vivado process and no
+hardware. Use the host's `tclsh8.6`, or the one inside an install (`tclsh8.5`
+in 2023.2 and older, where `try` and `lmap` do not exist).
 
 ```console
-$ export VRC_TEST_TCLSH=/tools/Xilinx/Vivado/2023.2/bin/unwrapped/lnx64.o/tclsh8.5
+$ export VRC_TEST_TCLSH=$(command -v tclsh8.6)
 $ vrc start emacstest --vivado "$PWD/tests/fake_vivado.sh"
 emacstest: listening on 127.0.0.1:38161 (pid 3176760)
 
