@@ -125,6 +125,91 @@ every session except a busy one somebody else started, which it names on
 stderr and leaves running, exiting 1; stopping that one takes its name. A
 Vivado attached through `Vivado_init.tcl` has no owner and so is never yours.
 
+## Run many scripts across several sessions
+
+A sweep over parameters or a list of cores is a queue of jobs and a few
+sessions to run them in. `vrc pool run` is that queue: it hands each job to
+the next free session, waits for memory before every dispatch, and writes
+each result to a file as the job finishes.
+
+```console
+$ cat jobs.txt
+synth.tcl top_a 2.5
+synth.tcl top_b 2.5
+name=wide synth.tcl top_c 4.0     # a job line is split like a shell command
+
+$ vrc pool run --workers 2 --version 2023.2 --jobs jobs.txt --out sweep
+pool: started pool41872-1 (pid 2118203)
+pool: started pool41872-2 (pid 2118440)
+pool: 3 job(s) on 2 session(s); results in sweep
+synth-2 pool41872-2 ok 412.7
+synth-1 pool41872-1 ok 431.0
+wide pool41872-1 ok 398.2
+pool: 3 ok
+
+$ cat sweep/wide.out
+WNS=0.421
+```
+
+A job is a Tcl file and its arguments, which the script reads from `$::argv`.
+Without `name=`, a job is named after its script, numbered when several jobs
+share one. Job lines can also be given as arguments, each quoted as one:
+`vrc pool run --sessions a,b 'synth.tcl top_a' 'synth.tcl top_b'`. A relative
+script path is relative to where `vrc pool run` was started.
+
+`--workers N` starts N sessions for the pool, one after another, and stops
+them when the jobs are done. `--vivado`, `--version`, `--cwd` and
+`--arg` go to those starts as for `vrc start`. `--sessions a,b` runs the jobs
+in sessions that already exist and leaves them running afterwards; they must
+be idle when the pool starts.
+
+The stdout line of a finished job is `name session state seconds`. Its result
+is in `<out>/<name>.out`, or its `errorInfo` in `<out>/<name>.err`, and
+`<out>/status.json` is rewritten after every change, so the jobs can be
+followed, and collected, from a shell other than the one that started the
+pool. `vrc pool status <out>` prints that file as a table. A pool that outlasts
+the calling shell's time limit belongs in the background, with the results
+read from `--out`.
+
+| state | meaning | run again? |
+|---|---|---|
+| `ok` | the script returned; the result is in `.out` | |
+| `error` | the script raised | no |
+| `timeout` | it ran longer than `--timeout`; its session was restarted | no |
+| `died` | its session died under it more than `--retries` times (default 1) | up to `--retries` times, in whichever session is free |
+| `no-memory` | `--mem-wait` passed without `--min-free` being available | no |
+| `no-worker` | every session had left the pool before its turn | no |
+| `cancelled` | the pool was interrupted while it ran | no |
+
+`vrc pool run` exits 0 when every job is `ok`, 1 when any is not, 3 when no
+session could be started or used, and 130 when interrupted.
+
+What the pool does about memory and failing sessions:
+
+| option | effect |
+|---|---|
+| `--min-free GB` | no job is dispatched and no worker started with less memory available (default 6; 0 skips the check) |
+| `--mem-wait DUR` | how long a dispatch waits for that memory before its job fails as `no-memory` (default 10m); the message lists the Vivados holding memory |
+| `--stagger DUR` | pause between two dispatches, so the first job's memory shows before the next check (default 0) |
+| `--max-runs M` | restart a session after M jobs; a session keeps 40 to 80 MB per synthesis (default never) |
+| `--timeout DUR` | per job; the session is restarted, because after a cancelled `synth_design` it cannot synthesise again (default none) |
+| `--init FILE` | Tcl run in each session before its first job and after every restart; a session whose init fails leaves the pool |
+| `--idle-stop DUR` | given to `--workers` sessions as a backstop, should the pool itself be killed (default 1h) |
+
+The memory check happens when a job is dispatched. It does not watch a job
+that grows afterwards, so set `--min-free` to what one job needs at its peak,
+and `--stagger` to how long a job takes to get there.
+
+A session that dies or times out is restarted like `vrc restart` does it,
+with the pool's memory floor in place of the 6 GB refusal. One that cannot be
+restarted leaves the pool, and the other sessions take over its jobs. A lent
+session started by something other than `vrc start` has no launch record; a
+timeout there is a `vrc cancel`.
+
+Ctrl-C or SIGTERM stops the pool: sessions it started are stopped with their
+jobs, in a lent session only the pool's job is cancelled, and jobs not yet
+started stay `queued` in `status.json`.
+
 ## Watch a long synthesis
 
 An out-of-context synthesis runs for half an hour, and `vrc` waits as long as
@@ -379,6 +464,13 @@ vrc repl  [NAME]   interactive prompt
 vrc ping  [NAME]   check it answers
 vrc info  [NAME]   show the descriptor and the open project
 vrc plugin-path    path to the Tcl plugin
+vrc pool run       jobs across        --sessions A,B | --workers N [--prefix P]
+                   several sessions   --jobs FILE  --out DIR  --json  --init FILE
+                                      --min-free GB --mem-wait DUR --stagger DUR
+                                      --max-runs M --timeout DUR --retries N
+                                      --vivado PATH --version VER --cwd DIR
+                                      --arg ARG --idle-stop DUR --start-wait SEC
+vrc pool status DIR  a pool's jobs    --json
 vrc --version      version of vrc
 ```
 

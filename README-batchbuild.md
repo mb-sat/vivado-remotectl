@@ -191,6 +191,17 @@ Every session gets the same list of runs. A session claims a run by creating
 so the list works as a shared queue and a slow IP does not hold up the
 others. `reset_runs` deletes the run directory and the claim with it.
 
+## What `vrc pool run` covers, and what it does not
+
+`vrc pool run` (see the main [README](README.md)) is the generic part of this
+pool as a `vrc` command: a queue of Tcl jobs over several sessions, with a
+memory floor before every dispatch, a restart after N jobs, a per-job timeout
+and a retry when a session dies. It does not replace `run_pool.sh` for a
+project's OOC runs. Three things here have no counterpart in it yet: the
+claim files that take the run list from a `.runs` directory, the reset of
+parameters and messages that `ooc_worker.tcl` does between two runs, and the
+watchdog that cancels the largest run when memory gets low mid-run.
+
 ## What is not handled yet
 
 These gaps matter for unattended builds. Each is addressed in

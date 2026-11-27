@@ -112,6 +112,18 @@ The `-scripts_only` hook from the PoC stays as the last fallback.
   too. However, it depends on how the GUI dispatches commands internally, and
   it changes behaviour for every project. Not pursued.
 
+## What exists: `vrc pool run`
+
+`vrc pool run` (`src/vivado_remotectl/pool.py`) is a foreground command that
+runs a list of Tcl jobs across sessions. It already holds the memory floor
+before a dispatch, the restart after N runs, the per-job timeout, the capped
+requeue after a worker died, and a `status.json` written after every change.
+It is not the pool manager described below. It ends with its job list, takes
+no submissions while it runs, and knows nothing of run directories or
+markers. The manager would reuse its queue and worker rules and add the
+submit and kill commands, the OOC worker Tcl and the watch on run
+directories.
+
 ## Components in vrc
 
 ```
